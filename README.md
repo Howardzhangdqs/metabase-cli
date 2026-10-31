@@ -54,6 +54,7 @@ python3 mbcli.py health
 | `MB_USERNAME` / `MB_PASSWORD` | 无 | 账密换 session（懒校验：首个需认证请求才要求，`health` 无凭据可跑） |
 | `MB_TIMEOUT` | `60` | 单请求 **read** 超时秒数（字节间隔上限，不是总时长；慢大查询可超时后仍在服务端运行，重试前请注意） |
 | `MB_SESSION_CACHE` | `~/.cache/mbcli/session.json` | session 缓存路径，`0600` 权限、原子写、14 天有效，收到 401 自动重登一次 |
+| `MB_CONFIG_DIR` | 未设置 | 配置目录约定：设置后配置文件默认为 `$MB_CONFIG_DIR/mbcli.toml`（`MB_CONFIG_FILE` 显式路径仍优先） |
 
 - `.env`：仅识别白名单键（`MB_URL/MB_USERNAME/MB_PASSWORD/MB_API_KEY`），支持 `#` 注释与引号；已在 `.gitignore` 中。
 - `config.toml`：`~/.config/mbcli/config.toml`，仅接受 `[metabase]` 段同名键（snake_case：`url`、`api_key`、`username`、`password`、`timeout`、`session_cache`）。
@@ -82,7 +83,7 @@ mbcli disconnect                              # 清空 [metabase] 段 + 删 sess
 - **`--default-db`** 经 `GET /api/database` 校验后以 **id** 落盘；生效优先级 `--db` > `MB_DEFAULT_DB` env > config `default_db`。
 - 成功输出 `{"connected":true,"url":…,"user":{…},"default_db":{…}|null,"replaced":旧url|null,"config_file":"…"}`；connect 会**连带废弃 session 缓存**（旧 session 属于旧连接）。
 - ⚠️ **密码以明文存入 config.toml**（文件 0600、目录 0700）。更安全的做法：在 Metabase 管理界面生成 **API Key**（v49+，`mbcli connect --api-key …`），无明文密码、无过期概念。
-- 配置文件路径可用 `MB_CONFIG_FILE` 重定向（默认 `~/.config/mbcli/config.toml`），便于沙箱/多环境。
+- 配置文件路径可用 `MB_CONFIG_FILE` 重定向（默认 `~/.config/mbcli/config.toml`），便于沙箱/多环境；也可用 `MB_CONFIG_DIR=<dir>` 约定目录（解析为 `<dir>/mbcli.toml`，显式 `MB_CONFIG_FILE` 优先）。
 
 ## 命令参考
 

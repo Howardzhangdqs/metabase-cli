@@ -54,6 +54,27 @@ def _matches_db(item: dict[str, Any], db_id: int) -> bool:
     return item.get("database_id") == db_id or item.get("table_db_id") == db_id
 
 
+def _item_db_id(item: dict[str, Any]) -> Any:
+    """The database an item belongs to: card → database_id, table → table_db_id."""
+    return (
+        item.get("database_id") if item.get("database_id") is not None else item.get("table_db_id")
+    )
+
+
+def _decorate_database_names(resolver: Resolver, items: list[dict[str, Any]]) -> dict[Any, str]:
+    """id → database name for every db referenced by `items` (P2-1).
+
+    Zero extra requests beyond the one `GET /api/database` the Resolver index
+    costs (shared with --db name resolution); items referencing no database
+    never trigger it. Unknown ids simply miss the map → database_name null.
+    """
+    referenced = {_item_db_id(item) for item in items}
+    referenced.discard(None)
+    if not referenced:
+        return {}
+    return {db_id: name for db_id, name in resolver.db_name_map().items() if db_id in referenced}
+
+
 def _fetch_keyword_pool(
     client: MetabaseClient,
     keyword: str,
@@ -189,7 +210,12 @@ def search(
                     merged = merged[:FETCH_HARD_CAP]
                     break
 
-        records = [SearchItem.from_api(item).to_dict() for item in merged]
+        records = []
+        db_names = _decorate_database_names(resolver, merged)
+        for item in merged:
+            record = SearchItem.from_api(item).to_dict()
+            record["database_name"] = db_names.get(_item_db_id(item))
+            records.append(record)
     if match_any and limit is not None and limit > 0:
         records = records[:limit]  # display cap over the merged, deduped pool
     emit_records(

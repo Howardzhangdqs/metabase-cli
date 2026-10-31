@@ -56,6 +56,12 @@ BLOCKED = [
     "GRANT ALL ON *.* TO u",
     "REPLACE INTO t VALUES (1)",
     "rename TABLE t TO t2",
+    # admin / transaction starters still need the --allow-write escape hatch
+    "SET FOREIGN_KEY_CHECKS = 0",
+    "USE other_db",
+    "CALL do_thing()",
+    "LOCK TABLES t WRITE",
+    "KILL 42",
     # mixed multi-statement: EVERY statement must be read-only
     "SELECT 1; DELETE FROM t",
     "SELECT 1; SELECT 2; DROP TABLE t",
@@ -66,10 +72,23 @@ BLOCKED = [
     "-- comment\nDELETE FROM t",
     "# comment\nUPDATE t SET x = 1",
     "/* outer /* nested */ DELETE FROM t",
-    # statement without a leading keyword
-    "123",
+]
+
+# Round-1 eval P1-1: a leading token that is not ANY known SQL statement
+# keyword is a usage error — it can never run even with --allow-write, so the
+# error must not advertise the flag (typos, clause words, non-SQL text).
+UNRECOGNIZED = [
+    "SELECTNOSUCH FROM x LIMIT 1",
+    "SEL 1",
+    "se1ect * from t",
+    "WITHH cte AS (SELECT 1) SELECT 1",
+    "selectt 1",
     "FROM t SELECT x",
+    "DELEET FROM t",
+    "instert into t values (1)",
+    "123",
     "??",
+    "UPDATEE t SET x = 1",
 ]
 
 
@@ -85,6 +104,26 @@ def test_blocked(sql: str) -> None:
     assert excinfo.value.code == "write_blocked"
     assert excinfo.value.exit_code == 2
     assert "--allow-write" in excinfo.value.message
+
+
+@pytest.mark.parametrize("sql", UNRECOGNIZED)
+def test_unrecognized_leading_keyword_is_invalid_args(sql: str) -> None:
+    with pytest.raises(MbcliError) as excinfo:
+        check_readonly(sql)
+    assert excinfo.value.code == "invalid_args"
+    assert excinfo.value.exit_code == 2
+    # P1-1: a typo can never be rescued by --allow-write — no such hint, ever.
+    assert "--allow-write" not in excinfo.value.message
+    assert "无法识别" in excinfo.value.message or "未以 SQL 关键字开头" in excinfo.value.message
+
+
+def test_unrecognized_keyword_detail_carries_keyword() -> None:
+    with pytest.raises(MbcliError) as excinfo:
+        check_readonly("SELECTNoSuch FROM x LIMIT 1")
+    error = excinfo.value
+    assert error.code == "invalid_args"
+    assert error.detail["keyword"] == "SELECTNOSUCH"
+    assert "只读白名单" in error.message
 
 
 @pytest.mark.parametrize(

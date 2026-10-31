@@ -148,6 +148,7 @@ def test_batch_golden_ndjson_three_commands(cli, mock_api, monkeypatch):
             "description": None,
             "collection": {"id": 1039, "name": "报表"},
             "database_id": None,
+            "database_name": None,  # P2-1: no db referenced → no index fetch
             "updated_at": "2026-10-01T08:00:00.000Z",
         }
     ]

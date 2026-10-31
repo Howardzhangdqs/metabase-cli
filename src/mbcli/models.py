@@ -237,6 +237,11 @@ class SearchItem(_Model):
     description: str | None
     collection: CollectionRef | None
     database_id: int | None
+    # Round-1 eval P2-1: client-side resolved from the Resolver's cached
+    # /api/database index (card → database_id, table → table_db_id); null when
+    # the item belongs to no/unknown database. SearchItem.from_api only seeds
+    # it when the server itself provides the key; commands overwrite it.
+    database_name: str | None
     updated_at: str | None
 
     @classmethod
@@ -254,6 +259,7 @@ class SearchItem(_Model):
                 else None
             ),
             database_id=payload.get("database_id"),
+            database_name=payload.get("database_name"),
             updated_at=payload.get("updated_at"),
         )
 

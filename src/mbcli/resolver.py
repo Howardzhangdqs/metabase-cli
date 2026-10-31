@@ -21,6 +21,7 @@ class Resolver:
     def __init__(self, client: MetabaseClient) -> None:
         self._client = client
         self._db_index: dict[str, list[dict[str, Any]]] | None = None
+        self._db_id_index: dict[int, str] | None = None
         self._metadata: dict[int, dict[str, Any]] = {}
         self._collection_index: dict[str, list[dict[str, Any]]] | None = None
 
@@ -32,17 +33,32 @@ class Resolver:
             return int(ref)
         return self._pick(self._db_name_index().get(ref, []), "database", ref)
 
+    def db_name_map(self) -> dict[int, str]:
+        """id → database name from the cached `GET /api/database` index.
+
+        Public read-only accessor (Round-1 eval P2-1: `search` decorates items
+        with database_name at zero extra request cost — the index is fetched at
+        most once per Resolver and shared with every db-name resolution).
+        """
+        self._db_name_index()  # ensure the index is loaded
+        assert self._db_id_index is not None
+        return dict(self._db_id_index)
+
     def _db_name_index(self) -> dict[str, list[dict[str, Any]]]:
         if self._db_index is None:
             payload = self._client.get("/api/database")
             data = payload.get("data") if isinstance(payload, dict) else payload
             index: dict[str, list[dict[str, Any]]] = {}
+            id_index: dict[int, str] = {}
             for item in data or []:
                 if isinstance(item, dict) and item.get("name") is not None:
                     index.setdefault(str(item["name"]), []).append(
                         {"id": item.get("id"), "name": item.get("name")}
                     )
+                    if isinstance(item.get("id"), int):
+                        id_index[item["id"]] = str(item["name"])
             self._db_index = index
+            self._db_id_index = id_index
         return self._db_index
 
     # -- tables --------------------------------------------------------------

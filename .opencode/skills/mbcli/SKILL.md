@@ -49,18 +49,23 @@ mb disconnect                                           # 清除
 ```
 databases list                          # 全部数据源
 schemas --db D / tables --db D [--match 子串] [--include-hidden]
+                                        #   --match 仅匹配物理表名，不匹配中文描述/display_name
 fields --table T [--db D]               # 含 FK 目标、语义类型
 fields --search 列名子串 --db D         # 跨表列搜索（零额外请求；reserved=true 标记保留字列）
 query --db D --native "SELECT …" [--param k=v]… [--format json|csv|ndjson|table|markdown]
                                         #   [--max-rows N(默认1000,0=不限)] [--out F] [--allow-write]
-cards run <id> [--param k=v]…           # 执行已保存问题
+                                        #   首关键词拼错(如 SELECTNOSUCH)=invalid_args，不是写操作
+cards run <id> [--param k=v]…           # 执行已保存问题；--param 绑定卡片声明的参数 id，
+                                        #   未声明的休眠 {{var}} 或未知 key → exit 2（绝不静默无过滤跑）
 cards show <id>                         # 回显其 SQL / MBQL
 collections list|show <id|root> [--model card|dashboard]…
 dashboards show <id>                    # 结构（卡片清单+参数定义）
 search "关键词" [--model card|table]… [--limit N]        # --limit 0=拉全集(页100,上限1000)
+                                        #   条目含 database_name（客户端解析库名，直接按名过滤）
 search "kw1,kw2" --match-any            # 多关键词并集，按 (model,id) 去重合并
 context --db D [--table T]…             # ★ 生成 markdown schema 摘要（直接可注入 prompt）
 freshness --db D [--table T]… [--sample]  # ★ 每表时间列 min/max（指纹优先，零查询；--sample 才发 MIN/MAX）
+                                        #   默认 --max-tables 20：按表名字典序取前 20，超出标 truncated
 overview [--top 10]                       # ★ 实例总览：库×表数、集合内容分布、最近更新
 printf 'tables --db 15 --match fut\n…' | mbcli batch   # 单进程批处理（NDJSON 行输出，共享会话省冷启动）
 ```
@@ -76,7 +81,7 @@ v0.2 新命令均已实装：`freshness`（数据新鲜度，指纹零查询）�
 - **stdout 只有数据**（默认 JSON）；诊断/错误在 stderr（单行 JSON `{"error":{"code","message","detail"}}`）。`-v` 请求日志也固定走 stderr，不会污染 stdout 数据流。
 - **退出码**：`0` 成功；`1` API/执行错误（auth_failed / bad_query / not_found / timeout…）；`2` 用法错误（invalid_args / write_blocked——加 `--allow-write` 可解除，但见 §4）。
 - 查询信封：`{"status","row_count","rows_returned","truncated","columns","rows","running_time_ms","cached","data_warnings"}`——`truncated:true` 时需改写 SQL 加 LIMIT 或提高 `--max-rows`。
-- 大结果：SQL 自带 LIMIT（首选）→ `--max-rows` → `--out`/`ndjson`。
+- 大结果：SQL 自带 LIMIT（首选）→ `--max-rows` → `--out`/`ndjson`。查询类 ndjson **首行**是 `{"columns":…}` 元数据、**末行**是 `{"truncated":…}` 哨兵、数据行是数组——管道过滤用 `jq -c 'select(type=="array")'`（对象行无同名字段，勿盲取 `.field`）。
 - `estimated_row_count` 是 Metabase 同步估值，**可失真数个数量级**，仅作参考。
 - `search --db` 只过滤当前返回页（服务端不支持按库过滤）；`search --limit 0` 拉全集时若命中 1000 行硬上限，输出尾会带 `truncated` 标注。
 - MySQL 保留字列（如 `date`/`order`/`key`/`year_month`）：`fields --search` 会标 `reserved:true`；bad_query 报错命中保留字时 detail 带"请用反引号包裹"提示。自生成 SQL 一律反引号标识符。

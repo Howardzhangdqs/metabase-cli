@@ -683,7 +683,7 @@ def test_cards_run_post_body_shape(cli, mock_api):
 
 def test_cards_run_params_in_body(cli, mock_api):
     route = mock_card_query(mock_api, 7876, dataset_payload([[1, "x"]]))
-    # card 7876 declares no parameters → fallback spec (fresh uuid + category)
+    # card 7876 declares a native template variable → --param binds to its id
     mock_api.get(f"{BASE}/api/card/7876").mock(
         return_value=httpx.Response(
             200,
@@ -694,7 +694,18 @@ def test_cards_run_params_in_body(cli, mock_api):
                 "dataset_query": {
                     "database": 15,
                     "type": "native",
-                    "native": {"query": "select 1", "template-tags": {}},
+                    "native": {
+                        "query": "select {{city}}",
+                        "template-tags": {
+                            "city": {
+                                "id": "33333333-3333-4333-8333-333333333333",
+                                "name": "city",
+                                "display-name": "城市",
+                                "type": "text",
+                                "required": False,
+                            }
+                        },
+                    },
                 },
             },
         )
@@ -704,13 +715,14 @@ def test_cards_run_params_in_body(cli, mock_api):
     )
     body = sent_body(route)
     assert body["ignore_cache"] is False
-    assert len(body["parameters"]) == 1
-    param = body["parameters"][0]
-    assert set(param) == {"id", "type", "target", "value"}
-    assert uuid.UUID(param["id"])
-    assert param["type"] == "category"
-    assert param["target"] == ["variable", ["template-tag", "city"]]
-    assert param["value"] == "上海"
+    assert body["parameters"] == [
+        {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "type": "text",
+            "target": ["variable", ["template-tag", "city"]],
+            "value": "上海",
+        }
+    ]
 
 
 def test_cards_run_envelope_golden(cli, mock_api):

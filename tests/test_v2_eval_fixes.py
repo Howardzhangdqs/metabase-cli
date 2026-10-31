@@ -147,6 +147,42 @@ def card_payload(
     }
 
 
+# Card 2164 ("线上消费-京东-二级类目-销售分析") — verbatim probe shape
+# (Round-1 eval P0-1): a pMBQL card. parameters is EMPTY; the variable is
+# declared ONLY as a LIST under dataset_query.stages[*].template-tags, with a
+# default ("服饰") the server falls back to when a parameter fails to bind.
+PMBQL_CARD_2164 = {
+    "id": 2164,
+    "name": "线上消费-京东-二级类目-销售分析",
+    "parameters": [],
+    "dataset_query": {
+        "lib/type": "mbql/query",
+        "stages": [
+            {
+                "lib/type": "mbql.stage/native",
+                "template-tags": [
+                    {
+                        "required": True,
+                        "id": "bbdc56f9-9ce5-d42c-a901-c5ebbe7e13ee",
+                        "name": "category_name",
+                        "display-name": "京东-一级类目",
+                        "type": "text",
+                        "default": "服饰",
+                    }
+                ],
+                "native": (
+                    "select date,sum(sales_value) as sales_value\n"
+                    "from tab_ec_jd_cat_yoy\n"
+                    "where sector_cn = {{category_name}} and date > '2019-12'\n"
+                    "group by date\norder by date asc;"
+                ),
+            }
+        ],
+        "database": 10,
+    },
+}
+
+
 def run_card(cli: Any, mock_api: Any, card: dict[str, Any], *extra: object) -> dict[str, Any]:
     mock_api.get(f"{BASE}/api/card/9001").mock(return_value=httpx.Response(200, json=card))
     route = mock_api.post(f"{BASE}/api/card/9001/query").mock(
@@ -210,14 +246,97 @@ def test_cards_run_param_reuses_template_tag_id_for_native_variables(cli, mock_a
     ]
 
 
-def test_cards_run_unmatched_param_falls_back_to_fresh_id(cli, mock_api):
-    body = run_card(cli, mock_api, card_payload(), "--param", "other=1")
-    param = body["parameters"][0]
-    assert set(param) == {"id", "type", "target", "value"}
-    assert uuid.UUID(param["id"])
-    assert param["type"] == "category"
-    assert param["target"] == ["variable", ["template-tag", "other"]]
-    assert param["value"] == "1"
+def test_cards_run_param_reuses_pmbql_stage_tag_id(cli, mock_api):
+    """P0-1 live shape: pMBQL cards declare variables as a LIST under
+    dataset_query.stages[*].template-tags (probe of card 2164). The v0.2.1
+    mapper only read the classic native.template-tags dict, missed the
+    declaration and silently ran with the tag's default."""
+    route = mock_api.get(f"{BASE}/api/card/2164").mock(
+        return_value=httpx.Response(200, json=PMBQL_CARD_2164)
+    )
+    query_route = mock_api.post(f"{BASE}/api/card/2164/query").mock(
+        return_value=httpx.Response(200, json=dataset_payload([[1]]))
+    )
+    cli(
+        "--url",
+        BASE,
+        "--api-key",
+        "k",
+        "cards",
+        "run",
+        "2164",
+        "--param",
+        "category_name=家用电器",
+    ).assert_ok(0)
+    assert route.called
+    assert sent_body(query_route)["parameters"] == [
+        {
+            "id": "bbdc56f9-9ce5-d42c-a901-c5ebbe7e13ee",
+            "type": "text",
+            "target": ["variable", ["template-tag", "category_name"]],
+            "value": "家用电器",
+        }
+    ]
+
+
+def test_cards_run_dormant_template_var_hard_fails(cli, mock_api):
+    """P0-1 rule b: {{var}} present in SQL but declared NOWHERE — the server
+    cannot bind it, so running would silently use no filter. Hard fail."""
+    card = card_payload(template_tags={})  # SQL still references {{n}}
+    mock_api.get(f"{BASE}/api/card/9001").mock(return_value=httpx.Response(200, json=card))
+    result = cli("--url", BASE, "--api-key", "k", "cards", "run", "9001", "--param", "n=1")
+    assert result.exit_code == 2
+    error = result.error()
+    assert error["code"] == "invalid_args"
+    assert "卡片未声明参数控件" in error["message"]
+    assert "'n'" in error["message"]
+    assert "query --native" in error["message"]
+    assert "cards show" in error["message"]
+    assert error["detail"]["dormant"] == ["n"]
+
+
+def test_cards_run_unknown_param_lists_declared_names(cli, mock_api):
+    """P0-1 rule c: a key matching nothing → invalid_args naming what IS
+    available (never a silent unfiltered run)."""
+    card = card_payload(
+        template_tags={
+            "n": {
+                "id": "22222222-2222-4222-8222-222222222222",
+                "name": "n",
+                "display-name": "n",
+                "type": "number",
+                "required": False,
+            }
+        }
+    )
+    mock_api.get(f"{BASE}/api/card/9001").mock(return_value=httpx.Response(200, json=card))
+    result = cli("--url", BASE, "--api-key", "k", "cards", "run", "9001", "--param", "other=1")
+    assert result.exit_code == 2
+    error = result.error()
+    assert error["code"] == "invalid_args"
+    assert "'other'" in error["message"]
+    assert "n" in error["message"]  # lists the card's actual parameter names
+    assert error["detail"]["unknown"] == ["other"]
+    assert error["detail"]["declared"] == ["n"]
+
+
+def test_cards_run_unknown_param_on_undeclared_card_names_nothing(cli, mock_api):
+    mock_api.get(f"{BASE}/api/card/9001").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 9001,
+                "parameters": [],
+                "dataset_query": {
+                    "type": "native",
+                    "native": {"query": "select 1", "template-tags": {}},
+                },
+            },
+        )
+    )
+    result = cli("--url", BASE, "--api-key", "k", "cards", "run", "9001", "--param", "x=1")
+    assert result.exit_code == 2
+    assert "未声明任何参数控件" in result.error()["message"]
 
 
 def test_cards_run_without_param_skips_card_fetch(cli, mock_api):
@@ -265,3 +384,107 @@ def test_build_single_modules_cover_every_source_module() -> None:
     # the P0 regression specifically: reserved must precede client (client.py
     # imports find_reserved_token from it)
     assert build_single.MODULES.index("reserved") < build_single.MODULES.index("client")
+
+
+# == Round-1 P1-1: unrecognized leading keyword is a usage error, not write ====
+
+
+def test_query_unknown_leading_keyword_is_invalid_args_not_write_blocked(cli, mock_api):
+    result = cli(
+        "--url",
+        BASE,
+        "--api-key",
+        "k",
+        "query",
+        "--db",
+        "10",
+        "--native",
+        "SELECTNoSuch FROM x LIMIT 1",
+    )
+    assert result.exit_code == 2
+    error = result.error()
+    assert error["code"] == "invalid_args"
+    assert error["detail"]["keyword"] == "SELECTNOSUCH"
+    assert "--allow-write" not in error["message"]
+    assert "无法识别的首关键词 `SELECTNOSUCH`" in error["message"]
+    assert not mock_api.calls  # guard runs before any network work
+
+
+# == Round-1 P2-1: search items carry database_name ==============================
+
+
+def test_search_unknown_database_id_yields_null_name(cli, mock_api):
+    mock_api.get(f"{BASE}/api/database").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": 13, "name": "bi_data"}], "total": 1})
+    )
+    mock_api.get(f"{BASE}/api/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": 1,
+                        "model": "card",
+                        "name": "ghost",
+                        "collection": None,
+                        "database_id": 999,  # not in the db index
+                        "updated_at": "2026-10-01T00:00:00Z",
+                    }
+                ],
+                "total": 1,
+            },
+        )
+    )
+    result = cli("--url", BASE, "--api-key", "k", "search", "ghost").assert_ok(0)
+    assert result.json()[0]["database_name"] is None
+
+
+# == Round-1 P2-3: MB_CONFIG_DIR config file resolution ==========================
+
+
+def _write_toml(path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def test_mb_config_dir_directs_config_file_default(tmp_path) -> None:
+    from mbcli.config import load_config
+
+    cfg_dir = tmp_path / "mbcli-config"
+    _write_toml(
+        cfg_dir / "mbcli.toml",
+        '[metabase]\nurl = "http://from-dir-toml"\nusername = "u"\npassword = "p"\n',
+    )
+    config = load_config(env={"MB_CONFIG_DIR": str(cfg_dir), "MB_URL": "http://env-wins"})
+    assert config.config_file == str(cfg_dir / "mbcli.toml")
+    assert config.url == "http://env-wins"  # env still outranks the toml
+    assert config.username == "u"  # the redirected file IS read
+
+
+def test_mb_config_file_wins_over_mb_config_dir(tmp_path) -> None:
+    from mbcli.config import load_config
+
+    cfg_dir = tmp_path / "dir"
+    _write_toml(cfg_dir / "mbcli.toml", '[metabase]\nurl = "http://dir"\n')
+    explicit = tmp_path / "explicit.toml"
+    _write_toml(explicit, '[metabase]\nurl = "http://explicit"\n')
+    config = load_config(
+        env={
+            "MB_CONFIG_DIR": str(cfg_dir),
+            "MB_CONFIG_FILE": str(explicit),
+            "MB_URL": "http://x",
+        }
+    )
+    assert config.config_file == str(explicit)
+    assert config.username is None  # explicit file (no creds) was honored
+
+
+def test_mb_config_dir_does_not_move_session_cache(tmp_path) -> None:
+    from mbcli.config import default_session_cache, load_config
+
+    config = load_config(
+        env={"MB_CONFIG_DIR": str(tmp_path), "MB_URL": "http://x"},
+        toml_path=tmp_path / "none.toml",
+    )
+    # session cache stays at ~/.cache unless MB_SESSION_CACHE says otherwise
+    assert config.session_cache == default_session_cache()

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
-from uuid import uuid4
 
 import typer
 
@@ -25,39 +25,104 @@ from mbcli.output import (
 
 app = typer.Typer(help="执行或查看已保存的问题（卡片）。", no_args_is_help=True)
 
+# Metabase native template variable reference: {{name}} (whitespace-tolerant;
+# inside [[optional blocks]] the inner {{var}} still matches).
+_TEMPLATE_VAR = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
-def card_param_specs(params: list[str] | None, card: dict[str, Any]) -> list[dict[str, Any]]:
-    """Map `--param k=v` onto a card's DECLARED parameter ids (v0.2).
 
-    The card declares its parameters in one of two places (read via
-    `GET /api/card/{id}`, the same payload `cards show` renders):
+def _card_dataset_query(card: dict[str, Any]) -> dict[str, Any]:
+    dq = card.get("dataset_query")
+    return dq if isinstance(dq, dict) else {}
 
-    - ``card["parameters"]``: dashboard-style defs, each with
-      id/name/slug/type (and possibly target) — `--param` matches by
-      ``slug`` or ``name`` and REUSES the declared id/type/target;
-    - ``dataset_query.native["template-tags"]``: native variable defs with
-      id/name/type — matched by tag name, id reused, target stays
-      ``["variable", ["template-tag", k]]``.
 
-    Unmatched params fall back to a fresh uuid + "category" variable target
-    (the M2 shape plus a stable id). Live note: `POST /api/card/{id}/query`
-    accepts this body shape (parameter ids must exist when the card declares
-    them — the query-side equivalent was probe-verified against a real
-    server; the reference instance has no parameterized card for an
-    end-to-end run, see tests/test_v2_eval_fixes.py).
+def _card_native_sql(card: dict[str, Any]) -> str:
+    """Best-effort native SQL text of a card (classic or pMBQL shape)."""
+    dq = _card_dataset_query(card)
+    native = dq.get("native")
+    chunks: list[str] = []
+    if isinstance(native, dict) and isinstance(native.get("query"), str):
+        chunks.append(native["query"])
+    stages = dq.get("stages")
+    if isinstance(stages, list):  # pMBQL: {"lib/type": "mbql/query", "stages": […]}
+        for stage in stages:
+            if isinstance(stage, dict) and isinstance(stage.get("native"), str):
+                chunks.append(stage["native"])
+    return "\n".join(chunks)
+
+
+def _card_declared_params(card: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Collect every parameter the card DECLARES, keyed by bindable name.
+
+    Three declaration surfaces (Round-1 eval P0-1 probe of card 2164, verbatim
+    shapes in tests/test_v2_eval_fixes.py):
+
+    1. ``card["parameters"]`` — dashboard-style defs with id/name/slug/type
+       (and possibly target); matched by ``slug`` or ``name``.
+    2. ``dataset_query.native["template-tags"]`` — the classic native dict
+       ``{name: {id, name, type, …}}``.
+    3. ``dataset_query.stages[*]["template-tags"]`` — pMBQL cards store a LIST
+       of tag dicts (``{"id", "name", "display-name", "type", "required",
+       "default"}``) under each mbql.stage/native. Card 2164 declares its
+       ``category_name`` variable ONLY here — the v0.2.1 mapper missed it and
+       silently ran with the tag's ``default`` instead.
     """
     declared: dict[str, dict[str, Any]] = {}
+
+    def _offer(name: Any, spec: dict[str, Any]) -> None:
+        if isinstance(name, str) and name and spec.get("id"):
+            declared.setdefault(name, spec)
+
     for spec in card.get("parameters") or []:
-        if isinstance(spec, dict) and spec.get("id"):
-            for alias in (spec.get("slug"), spec.get("name")):
-                if isinstance(alias, str) and alias:
-                    declared.setdefault(alias, spec)
-    tags = ((card.get("dataset_query") or {}).get("native") or {}).get("template-tags") or {}
+        if isinstance(spec, dict):
+            _offer(spec.get("slug"), spec)
+            _offer(spec.get("name"), spec)
+
+    dq = _card_dataset_query(card)
+    native = dq.get("native")
+    tags = native.get("template-tags") if isinstance(native, dict) else None
     if isinstance(tags, dict):
         for name, tag in tags.items():
-            if isinstance(name, str) and isinstance(tag, dict) and tag.get("id"):
-                declared.setdefault(name, tag)
+            if isinstance(tag, dict):
+                _offer(name, tag)
+    stages = dq.get("stages")
+    if isinstance(stages, list):
+        for stage in stages:
+            tags = stage.get("template-tags") if isinstance(stage, dict) else None
+            if isinstance(tags, dict):
+                for name, tag in tags.items():
+                    if isinstance(tag, dict):
+                        _offer(name, tag)
+            elif isinstance(tags, list):
+                for tag in tags:
+                    if isinstance(tag, dict):
+                        _offer(tag.get("name"), tag)
+    return declared
+
+
+def card_param_specs(params: list[str] | None, card: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map `--param k=v` onto a card's DECLARED parameters (Round-1 eval P0-1).
+
+    Binding rules (live-verified against card 2164, a pMBQL card):
+
+    a. the key matches a declared parameter (dashboard parameter by
+       name/slug, template tag by tag name — classic dict or pMBQL stage
+       list): send ``{"id": <declared id>, "type": <declared type|category>,
+       "target": <declared target|variable target>, "value": v}``. The server
+       REQUIRES the id — a parameter without id is 400
+       ``{"errors": {"parameters": {"id": "Schema for a string that cannot be
+       blank."}}}``, and an id that matches no declaration is silently
+       ignored (the card runs with the tag's default — the P0-1 bug).
+    b. the key is NOT declared but ``{{key}}`` appears in the card's native
+       SQL (dormant template variable): hard fail invalid_args — NEVER run
+       unfiltered.
+    c. the key matches nothing at all: invalid_args listing the card's
+       declared parameter names.
+    """
+    declared = _card_declared_params(card)
+    sql_vars = set(_TEMPLATE_VAR.findall(_card_native_sql(card)))
     specs: list[dict[str, Any]] = []
+    dormant: list[str] = []
+    unknown: list[str] = []
     for key, value in parse_param_items(params):
         match = declared.get(key)
         if match is not None:
@@ -69,15 +134,26 @@ def card_param_specs(params: list[str] | None, card: dict[str, Any]) -> list[dic
                     "value": value,
                 }
             )
+        elif key in sql_vars:
+            dormant.append(key)
         else:
-            specs.append(
-                {
-                    "id": str(uuid4()),
-                    "type": "category",
-                    "target": ["variable", ["template-tag", key]],
-                    "value": value,
-                }
-            )
+            unknown.append(key)
+    if dormant:
+        raise MbcliError(
+            "invalid_args",
+            "卡片未声明参数控件 "
+            + "、".join(repr(k) for k in dormant)
+            + "（SQL 含休眠模板变量），请用 `query --native` 复用其 SQL"
+            "（`cards show <id>` 查看）",
+            detail={"dormant": dormant, "declared": sorted(declared)},
+        )
+    if unknown:
+        available = "、".join(sorted(declared)) if declared else "（该卡片未声明任何参数控件）"
+        raise MbcliError(
+            "invalid_args",
+            "卡片未声明参数 " + "、".join(repr(k) for k in unknown) + "；可用参数: " + available,
+            detail={"unknown": unknown, "declared": sorted(declared)},
+        )
     return specs
 
 

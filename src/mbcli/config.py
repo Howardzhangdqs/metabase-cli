@@ -55,6 +55,21 @@ def default_toml_path() -> Path:
     return Path.home() / ".config" / "mbcli" / "config.toml"
 
 
+def config_file_from_env(env: Mapping[str, str]) -> str | None:
+    """Locate the config file from the environment (Round-1 eval P2-3).
+
+    Precedence: MB_CONFIG_FILE (explicit file) > MB_CONFIG_DIR/mbcli.toml
+    (directory convention) > None (caller falls back to default_toml_path()).
+    """
+    explicit = _clean(env.get("MB_CONFIG_FILE"))
+    if explicit:
+        return explicit
+    directory = _clean(env.get("MB_CONFIG_DIR"))
+    if directory:
+        return str(Path(directory).expanduser() / "mbcli.toml")
+    return None
+
+
 @dataclass
 class Config:
     """Resolved configuration. `url` is always slash-stripped and non-empty
@@ -177,11 +192,11 @@ def load_config(
     env_map: Mapping[str, str] = os.environ if env is None else env
     dotenv = parse_dotenv(Path(".env") if dotenv_path is None else dotenv_path)
     # where to read the [metabase] section from: explicit test injection >
-    # MB_CONFIG_FILE env > default path (DESIGN §3.1 config_file row)
+    # MB_CONFIG_FILE env > MB_CONFIG_DIR/mbcli.toml (P2-3) > default path
     config_file = (
         str(toml_path)
         if toml_path is not None
-        else (cli_over.get("config_file") or _clean(env_map.get("MB_CONFIG_FILE")))
+        else (cli_over.get("config_file") or config_file_from_env(env_map))
     )
     if not config_file:
         config_file = str(default_toml_path())

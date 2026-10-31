@@ -321,6 +321,7 @@ def test_collection_info_and_search_item():
         "description": None,
         "collection": {"id": 1039, "name": "量化"},
         "database_id": 13,
+        "database_name": None,  # set by commands via the Resolver id→name map
         "updated_at": "2024-06-01T00:00:00Z",
     }
 

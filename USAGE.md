@@ -141,7 +141,8 @@ session 缓存**损坏或不可解析时静默忽略**并重登，不报错。
 | `MB_USERNAME` / `MB_PASSWORD` | 无 | 懒校验：首个需认证请求才要求（`health` 无凭据可跑） |
 | `MB_TIMEOUT` | `60` | 单请求 **read** 超时秒数（字节间隔上限，非总时长） |
 | `MB_SESSION_CACHE` | `~/.cache/mbcli/session.json` | session 缓存路径（0600） |
-| `MB_CONFIG_FILE` | `~/.config/mbcli/config.toml` | connect 写入/读取的配置文件；多实例/沙箱用它切换 |
+| `MB_CONFIG_DIR` | 未设置 | 配置**目录**约定：设置后 config 默认路径变为 `$MB_CONFIG_DIR/mbcli.toml`（connect 写入/读取都跟随；`MB_CONFIG_FILE` 显式文件仍优先） |
+| `MB_CONFIG_FILE` | `~/.config/mbcli/config.toml` | connect 写入/读取的配置文件；多实例/沙箱用它切换（优先级高于 MB_CONFIG_DIR） |
 | `MB_DEFAULT_DB` | 无 | `--db` 缺省回退值（id 或 name）；优先级 `--db` > 本变量 > config.toml `default_db` |
 
 ### 3.5 凭据安全建议
@@ -328,7 +329,7 @@ mbcli tables [--db <id|name>] [--schema S] [--match SUBSTR] [--include-hidden]
 |---|---|---|---|
 | `--db` | str | 无 | 同 schemas 的回退链 |
 | `--schema` | str | 无 | 按 schema 名过滤 |
-| `--match` | str | 无 | 表名子串过滤（大小写不敏感） |
+| `--match` | str | 无 | 表名子串过滤（大小写不敏感）。**仅匹配物理表名 `name`**——不匹配中文描述/`display_name`；按语义找表请用 `search --model table` |
 | `--include-hidden` | flag | 关 | 默认隐藏 `active=false` 或带 `visibility_type` 的表 |
 
 ```bash
@@ -422,7 +423,7 @@ JSON 输出（信封逐字段说明见 §6.3）：
 {"error": {"code": "write_blocked", "message": "non-read-only statement rejected (leading keyword DELETE); re-run with --allow-write to allow write operations", "detail": {"keyword": "DELETE", "statement": "DELETE FROM app_mau"}}}
 ```
 
-可能错误码：`write_blocked`（非 SELECT，exit 2）、`invalid_args`（param 畸形 / --db 全缺 / --fields 用于信封 / 纯注释空 SQL）、`bad_query`（HTTP 400 且 `status=failed`，如表不存在）、`auth_failed`、`not_found`（库名解析）、`timeout`（注意：超时不取消服务端查询）、`rate_limited`、`server_error`。
+可能错误码：`write_blocked`（**已知写/管理关键词**（DELETE/UPDATE/INSERT/DROP/SET/…）非只读，exit 2，detail 提示加 `--allow-write`）、`invalid_args`（param 畸形 / --db 全缺 / --fields 用于信封 / 纯注释空 SQL / **无法识别的首关键词**（疑似拼写错误，如 `SELECTNOSUCH`——此类语句 `--allow-write` 也救不了，报错绝不提示它））、`bad_query`（HTTP 400 且 `status=failed`，如表不存在）、`auth_failed`、`not_found`（库名解析）、`timeout`（注意：超时不取消服务端查询）、`rate_limited`、`server_error`。
 
 ### 5.10 `mbcli cards run`
 
@@ -435,7 +436,7 @@ mbcli cards run CARD_ID [--param k=v]… [--format FMT] [--max-rows N] [--out FI
 | 选项 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `card_id` | int | **必填**（位置参数） | 卡片 id |
-| `--param` | str（可重复） | 无 | 同 query 的 `k=v` 文法；v0.2 起自动映射到卡片**声明的参数 id**：卡片 `parameters` 按 name/slug 匹配（复用其 id/type/target），native 模板变量按 tag 名匹配（复用 tag id）；未匹配的参数退化为新生成 id + category variable 目标。带 `--param` 时会先 `GET /api/card/{id}` 读取定义 |
+| `--param` | str（可重复） | 无 | 同 query 的 `k=v` 文法；v0.2.2 起绑定到卡片**声明的参数 id**（卡片 `parameters` 按 name/slug 匹配；native 模板变量按 tag 名匹配——含 pMBQL `dataset_query.stages[*].template-tags` 列表形态）。**硬失败语义**：`{{var}}` 出现在 SQL 但卡片未声明（休眠模板变量）→ `invalid_args`（exit 2，指引改用 `query --native` 复用 SQL）；key 完全不匹配 → `invalid_args` 并列出可用参数名——**绝不静默无过滤执行**。带 `--param` 时会先 `GET /api/card/{id}` 读取定义 |
 | 其余 | | | 同 query 的塑形选项 |
 
 ```bash
@@ -576,8 +577,10 @@ mbcli search 用户 --limit 0                             # 拉全集（≤1000 
 ```
 
 ```json
-[{"id": 7876, "model": "card", "name": "数据日期", "description": null, "collection": {"id": 1039, "name": "微信"}, "database_id": null, "updated_at": "2026-10-30T22:21:23.292094+08:00"}, …]
+[{"id": 7876, "model": "card", "name": "数据日期", "description": null, "collection": {"id": 1039, "name": "微信"}, "database_id": null, "database_name": null, "updated_at": "2026-10-30T22:21:23.292094+08:00"}, …]
 ```
+
+`database_name`（v0.2.2）：客户端经 Resolver 缓存的 `/api/database` 索引解析的**库名**（card 取 `database_id`，table 取 `table_db_id`，一次索引请求共享复用、零逐条请求；无库或未知 id 为 null）——找资产时可直接按名过滤，无需再 `databases list` 对照。
 
 **`--limit 0` / `--match-any` 全集模式的截断标注**（§5.2 哲学）：命中 1000 行硬上限时——json 变为信封 `{"truncated": true, "rows_returned": 1000, "items": […]}`；ndjson 末行追加哨兵 `{"truncated": true, "rows_returned": 1000}`；csv 末行追加 `# {"truncated": …}` 注释行；table/markdown 末行追加同名标记行。未触顶时输出与普通模式完全一致（纯数组）。
 
@@ -680,6 +683,8 @@ mbcli batch < stdin    # 每行一条子命令 argv，输出 NDJSON
 | `overview` | 实例总览：库×表数、非个人顶层集合内容分布、最近更新 | `--top`（默认 10） |
 | `batch` | 单进程多命令（消 uv 冷启动），stdout 每命令一行 NDJSON `{"index","argv","exit","error","result"}` | — |
 
+**freshness 的 `--max-tables` 截断语义**：未指定 `--table` 时按**表名字典序**确定性取前 N（默认 20）；库内表更多时输出尾标注 `truncated`（§5.2 哲学）——完整覆盖请加 `--max-tables` 或逐批 `--table`。指定 `--table` 则精确处理那些表、无截断。
+
 ```bash
 mbcli freshness --db 15                 # [{"table","table_id","column","min","max","source":"fingerprint|sample|none","reason"}]
 mbcli overview --top 20
@@ -755,6 +760,20 @@ stderr 单行 JSON（`ensure_ascii=False`）：
 [2]
 {"truncated": false, "rows_returned": 2}
 ```
+
+管道消费注意事项（jq 侧）：
+
+```bash
+# 只要数据行：跳过首行元数据（columns）与末行哨兵（truncated）
+mbcli query --db 15 --native "SELECT …" --format ndjson \
+  | jq -c 'select(type == "array") | .[0]'            # row 是数组，不是对象
+# 先校验完整性再取数（哨兵带 truncated:true 时应改写 SQL 加 LIMIT）
+… | jq -s '.[-1] | select(.truncated == true) // empty'
+```
+
+- 首行 `{"columns": …}` 与末行 `{"truncated": …}` 都是**对象**，数据行是**数组**——用 `select(type=="array")` 一分为二，勿按 `.field` 盲取（对象行没有同名字段）。
+- `jq` 按行流式处理时无法"回头"：需要"先看哨兵再用数据"就得 `jq -s` 一次性读入（大结果慎用）或落盘后两遍扫描（`--out f.ndjson` + `tail -1 f.ndjson` 预检）。
+- 记录数组型命令（search/tables 等）的 ndjson 每行是**对象**，无 columns 元数据行；仅有触顶时的末行哨兵。
 
 ### 6.5 大结果三件套
 
@@ -839,7 +858,7 @@ x,y
 临时：`--db <id|name>`；会话级：`MB_DEFAULT_DB`；永久：`mbcli connect --default-db <id|name>`（重连同一连接即可，无需 `--force`）。
 
 **Q2：多实例 / 多套配置怎么办？**
-用 `MB_CONFIG_FILE` 指向不同的 toml（connect 写入、所有命令读取都跟随）：`MB_CONFIG_FILE=~/.config/mbcli/prod.toml mbcli connect …`。
+用 `MB_CONFIG_FILE` 指向不同的 toml（connect 写入、所有命令读取都跟随）：`MB_CONFIG_FILE=~/.config/mbcli/prod.toml mbcli connect …`。只想到"另一套目录"时也可用 `MB_CONFIG_DIR=~/mbcli-configs/prod`（解析为该目录下的 `mbcli.toml`；显式 `MB_CONFIG_FILE` 优先）。
 
 **Q3：为什么没有 `cards list` 全量命令？**
 实测该实例 `GET /api/card?f=all` 单次 6MB+ 且 60s 超时。找卡走 `search`，浏览走 `collections show --model card`（分页）。

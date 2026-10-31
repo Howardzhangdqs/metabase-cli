@@ -248,6 +248,7 @@ SEARCH_EXPECTED = [
         "description": None,
         "collection": {"id": 1039, "name": "报表"},
         "database_id": 13,
+        "database_name": "bi_data",
         "updated_at": "2026-10-01T08:00:00.000Z",
     },
     {
@@ -257,6 +258,7 @@ SEARCH_EXPECTED = [
         "description": "日活",
         "collection": None,
         "database_id": None,
+        "database_name": "quant_data",  # P2-1: tables resolve via table_db_id
         "updated_at": "2026-10-01T08:00:00.000Z",
     },
     {
@@ -266,6 +268,7 @@ SEARCH_EXPECTED = [
         "description": None,
         "collection": {"id": 2, "name": "root"},
         "database_id": None,
+        "database_name": None,  # dashboards belong to no database
         "updated_at": "2026-10-01T08:00:00.000Z",
     },
 ]
@@ -286,6 +289,14 @@ def mock_route(mock_api, method_url: str, payload=None, **kwargs):
     route = mock_api.get(method_url)
     route.mock(return_value=httpx.Response(200, json=payload, **kwargs))
     return route
+
+
+def mock_search_results(mock_api, payload=SEARCH_PAYLOAD):
+    """Search route + the /api/database index P2-1 name decoration needs
+    (SEARCH_PAYLOAD items reference database ids 13/15 → Resolver loads the
+    cached id→name map: one extra request, zero per-item)."""
+    mock_route(mock_api, f"{BASE}/api/database", DATABASES_FOR_NAME)
+    return mock_route(mock_api, f"{BASE}/api/search", payload)
 
 
 def last_params(route) -> httpx.QueryParams:
@@ -537,7 +548,7 @@ def test_dashboards_show_table_format_smoke(cli, mock_api):
 
 
 def test_search_sends_q_and_plural_models(cli, mock_api):
-    route = mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    route = mock_search_results(mock_api)
     cli(
         "--url",
         BASE,
@@ -557,7 +568,7 @@ def test_search_sends_q_and_plural_models(cli, mock_api):
 
 
 def test_search_comma_models_limit_offset(cli, mock_api):
-    route = mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    route = mock_search_results(mock_api)
     cli(
         "--url",
         BASE,
@@ -579,7 +590,7 @@ def test_search_comma_models_limit_offset(cli, mock_api):
 
 
 def test_search_no_params_when_defaults(cli, mock_api):
-    route = mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    route = mock_search_results(mock_api)
     cli("--url", BASE, "--api-key", "k", "search", "数据").assert_ok(0)
     params = last_params(route)
     assert params.get("q") == "数据"
@@ -589,12 +600,21 @@ def test_search_no_params_when_defaults(cli, mock_api):
 
 
 def test_search_whitelist_golden(cli, mock_api):
-    mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    mock_search_results(mock_api)
     result = cli("--url", BASE, "--api-key", "k", "search", "数据").assert_ok(0)
     assert result.json() == SEARCH_EXPECTED
     assert all(
         list(item)
-        == ["id", "model", "name", "description", "collection", "database_id", "updated_at"]
+        == [
+            "id",
+            "model",
+            "name",
+            "description",
+            "collection",
+            "database_id",
+            "database_name",
+            "updated_at",
+        ]
         for item in result.json()
     )
 
@@ -603,27 +623,31 @@ def test_search_db_page_filter_drops_mismatch_keeps_match(cli, mock_api):
     """--db is a CLIENT-side filter on the returned page (DESIGN §4): cards are
     matched via database_id, table-model items via table_db_id, items with
     neither key are dropped."""
-    mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    mock_search_results(mock_api)
     result = cli("--url", BASE, "--api-key", "k", "search", "数据", "--db", "15").assert_ok(0)
     assert result.json() == [SEARCH_EXPECTED[1]]  # only the table item (table_db_id=15)
 
 
 def test_search_db_matches_card_database_id(cli, mock_api):
-    mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    mock_search_results(mock_api)
     result = cli("--url", BASE, "--api-key", "k", "search", "数据", "--db", "13").assert_ok(0)
     assert result.json() == [SEARCH_EXPECTED[0]]  # the card (database_id=13)
 
 
-def test_search_db_numeric_id_needs_no_db_listing(cli, mock_api):
-    listing = mock_route(mock_api, f"{BASE}/api/database", DATABASES_FOR_NAME)
-    mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
-    cli("--url", BASE, "--api-key", "k", "search", "数据", "--db", "15").assert_ok(0)
-    assert listing.call_count == 0  # numeric ref passes through, no /api/database call
+def test_search_db_numeric_id_still_fetches_listing_for_names(cli, mock_api):
+    """A numeric --db still resolves without a lookup, but since v0.2.2 the
+    search output decorates items with database_name (P2-1), which loads the
+    Resolver's cached /api/database index exactly once — shared with any
+    --db-by-name resolution, never per item."""
+    listing = mock_search_results(mock_api)
+    result = cli("--url", BASE, "--api-key", "k", "search", "数据", "--db", "15").assert_ok(0)
+    assert listing.call_count == 1  # one cached index fetch for name decoration
+    assert result.json() == [SEARCH_EXPECTED[1]]
 
 
 def test_search_db_by_name_resolves_via_listing(cli, mock_api):
     mock_route(mock_api, f"{BASE}/api/database", DATABASES_FOR_NAME)
-    mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    mock_search_results(mock_api)
     result = cli("--url", BASE, "--api-key", "k", "search", "数据", "--db", "quant_data").assert_ok(
         0
     )
@@ -646,7 +670,7 @@ def test_search_empty_page(cli, mock_api):
 
 
 def test_search_csv_and_fields(cli, mock_api):
-    mock_route(mock_api, f"{BASE}/api/search", SEARCH_PAYLOAD)
+    mock_search_results(mock_api)
     result = cli(
         "--url",
         BASE,

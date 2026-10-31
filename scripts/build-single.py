@@ -72,6 +72,9 @@ MODULES = [
     "commands.dashboards",
     "commands.search",
     "commands.context",
+    "commands.freshness",
+    "commands.overview",
+    "commands.batch",
     "cli",
 ]
 

@@ -20,8 +20,9 @@ if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
 fi
 
 # 3) 以 tag 指向提交的时间戳做 SOURCE_DATE_EPOCH → 确定性生成
+#    （必须经 uv run：生成器自检会用当前解释器跑 mbcli.py --help，需 typer/httpx）
 EPOCH=$(git log -1 --format=%ct "$TAG")
-SOURCE_DATE_EPOCH="$EPOCH" python3 scripts/build-single.py
+SOURCE_DATE_EPOCH="$EPOCH" uv run python scripts/build-single.py
 sha256sum mbcli.py > mbcli.py.sha256
 echo "产物: mbcli.py ($(wc -c < mbcli.py) 字节, sha256 $(cut -d' ' -f1 mbcli.py.sha256 | cut -c1-16)…)"
 

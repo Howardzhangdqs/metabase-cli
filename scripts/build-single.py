@@ -346,7 +346,7 @@ def assemble(
         "",
         "用法：python3 mbcli.py …（与安装版 mbcli 命令完全等价）。",
         "",
-        "重新生成：python3 scripts/build-single.py（修改 src/ 后必须重新生成）。",
+        "重新生成：uv run python scripts/build-single.py（修改 src/ 后必须重新生成；需在装有 typer/httpx 的环境运行）。",
         "",
         f"生成时间：{stamp}（SOURCE_DATE_EPOCH 可覆盖，便于可复现构建）",
         f"mbcli 版本：{version}",

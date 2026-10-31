@@ -1,0 +1,43 @@
+[project]
+name = "mbcli"
+version = "0.1.0"
+description = "Agent-friendly command-line client for the Metabase REST API"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+mbcli = "mbcli.cli:main"
+
+[dependency-groups]
+dev = [
+    "allure-pytest>=2.16.2",
+    "pytest>=8.0",
+    "respx>=0.22",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbcli"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# mbcli.py is a generated artifact (scripts/build-single.py) — never linted.
+extend-exclude = ["mbcli.py"]
+
+[tool.ruff.lint]
+# PYI034 wants typing.Self (py311+) for __enter__; we support 3.10.
+ignore = ["PYI034"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: live read-only tests against a real Metabase instance (requires MBCLI_INTEGRATION=1 and MB_URL; see DESIGN §7)",
+]

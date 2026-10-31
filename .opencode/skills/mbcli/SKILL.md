@@ -11,18 +11,21 @@ description: Use when the task needs Metabase data — 浏览库/表/字段元�
 
 ```bash
 # zsh 安全：shell 函数（旧的 MB="uv run …"; $MB … 形式在 zsh 下 exit 127，勿再用）
-mb() { uv run --no-project --with typer --with httpx python mbcli.py "$@"; }
+# mbcli.py 文件头带 PEP 723 依赖元数据：uv 自动准备 typer/httpx，无需任何 --with 标志
+mb() { uv run mbcli.py "$@"; }
 mb --help
 ```
 
 非交互/一次性场景（不便定义函数时）用原样参数形式：
 
 ```bash
-uv run --no-project --with typer --with httpx python mbcli.py --help
+uv run mbcli.py --help
 ```
 
+无 uv 的目标机退化路径：`python3 -m pip install typer httpx && python3 mbcli.py …`（Python >= 3.10；rich 由 typer 携带，仅 `--format table` 需要）。
+
 若 `mbcli.py` 缺失（clone 后未带）：`curl -LO https://github.com/Howardzhangdqs/metabase-cli/releases/latest/download/mbcli.py`
-或在仓库内 `uv run python scripts/build-single.py && cp mbcli.py .opencode/skills/mbcli/`。
+或在仓库内 `uv run python scripts/build-single.py && cp dist/mbcli.py .opencode/skills/mbcli/`。
 
 ## 1. 连接（一次性）
 
@@ -64,14 +67,14 @@ printf 'tables --db 15 --match fut\n…' | mbcli batch   # 单进程批处理（
 
 记录数组型命令统一支持 `--format json|csv|ndjson|table|markdown`（markdown = 管道表，键名做表头）。
 
-v0.2 新命令占位（已注册、尚未实现，调用返回 `not_implemented` exit 1）：`freshness`（数据新鲜度）/ `overview`（实例总览）/ `batch`（stdin 多命令）。
+v0.2 新命令均已实装：`freshness`（数据新鲜度，指纹零查询）、`overview`（实例总览）、`batch`（stdin 多命令批处理，输出 NDJSON）。
 
 `--db` 可用 id 或名称；省略时回退 default_db（connect --default-db 持久化的值）。
 
 ## 3. Agent 契约（务必遵守的解读规则）
 
 - **stdout 只有数据**（默认 JSON）；诊断/错误在 stderr（单行 JSON `{"error":{"code","message","detail"}}`）。`-v` 请求日志也固定走 stderr，不会污染 stdout 数据流。
-- **退出码**：`0` 成功；`1` API/执行错误（auth_failed / bad_query / not_found / timeout… / not_implemented）；`2` 用法错误（invalid_args / write_blocked——加 `--allow-write` 可解除，但见 §4）。
+- **退出码**：`0` 成功；`1` API/执行错误（auth_failed / bad_query / not_found / timeout…）；`2` 用法错误（invalid_args / write_blocked——加 `--allow-write` 可解除，但见 §4）。
 - 查询信封：`{"status","row_count","rows_returned","truncated","columns","rows","running_time_ms","cached","data_warnings"}`——`truncated:true` 时需改写 SQL 加 LIMIT 或提高 `--max-rows`。
 - 大结果：SQL 自带 LIMIT（首选）→ `--max-rows` → `--out`/`ndjson`。
 - `estimated_row_count` 是 Metabase 同步估值，**可失真数个数量级**，仅作参考。

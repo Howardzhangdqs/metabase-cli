@@ -1,6 +1,6 @@
 # mbcli — 面向 Agent 的 Metabase 命令行客户端
 
-> 📖 **完整使用文档见 [USAGE.md](USAGE.md)** — 全部命令的语法/选项表/示例/输出样例/错误码、Agent 集成指南与故障排查（v0.2 起含 markdown 格式、search --match-any/--limit 0、fields --search、保留字提示；freshness/overview/batch 为占位）。
+> 📖 **完整使用文档见 [USAGE.md](USAGE.md)** — 全部命令的语法/选项表/示例/输出样例/错误码、Agent 集成指南与故障排查（v0.2 起含 markdown 格式、search --match-any/--limit 0、fields --search、保留字提示、freshness/overview/batch 实装与 `--param` 模板变量自动声明）。
 
 通过 Metabase REST API 浏览元数据、执行只读 SQL、检索已保存的资产（问题/集合/仪表盘），并一键生成适合注入 LLM prompt 的 schema 上下文。设计详见 [DESIGN.md](DESIGN.md)。
 
@@ -28,19 +28,20 @@ uv run mbcli --help
 
 ### 单文件脚本（免安装，经 Release 发布）
 
-[`mbcli.py`](../../releases) 是**整个项目合并而成的单文件脚本**（生成物，**不入库**，从 GitHub Releases 下载最新版）：适合无法安装包、但目标机自带 Python 与依赖的机器。依赖**不打包、不内嵌**——直接使用目标机自己的库：
+[`mbcli.py`](../../releases) 是**整个项目合并而成的单文件脚本**（生成物，**不入库**，从 GitHub Releases 下载最新版）：适合无法安装包的机器。文件头带 **PEP 723 依赖元数据**——`uv run` 会自动准备依赖，零额外参数；依赖不打包进文件，纯 Python 运行时用目标机自己的库：
 
 ```bash
-# 目标机要求：Python >= 3.10，且已安装 typer（>=0.12）与 httpx（>=0.27）
-pip install typer httpx       # rich 由 typer 携带，仅 --format table 需要
+uv run mbcli.py --help        # PEP 723：uv 自动安装 typer>=0.12 与 httpx>=0.27，零标志
 
+# 或用目标机自带依赖（Python >= 3.10；rich 由 typer 携带，仅 --format table 需要）
+pip install typer httpx
 python3 mbcli.py --help       # 用法与安装版 mbcli 完全等价
 python3 mbcli.py health
 ```
 
-改动 `src/mbcli/` 后重新生成：`python3 scripts/build-single.py`（在装有 typer/httpx 的环境中运行，如 `uv run python scripts/build-single.py`；生成器自带自检）。
+改动 `src/mbcli/` 后重新生成：`python3 scripts/build-single.py`（在装有 typer/httpx 的环境中运行，如 `uv run python scripts/build-single.py`；生成器自带自检——模块清单完整性、`--help`、保留字金丝雀与真实错误路径冒烟）。产物在 **`dist/mbcli.py`**（`dist/` 不入库）。
 
-> ⚠️ **`mbcli.py` 是生成物，请勿手改**——任何修改都会在下次生成时丢失；请改 `src/mbcli/` 源码后重新生成。
+> ⚠️ **`dist/mbcli.py` 是生成物，请勿手改**——任何修改都会在下次生成时丢失；请改 `src/mbcli/` 源码后重新生成。
 
 ## 配置
 
@@ -124,9 +125,7 @@ mbcli search "kw1,kw2" --match-any [--limit N]   # 多关键词并集，按 (mod
 mbcli context --db <id|name> [--table T]… [--max-tables 50] [--include-fields-pattern '.*'] [--markdown|--json]
 ```
 
-- **v0.2 新增**：`freshness`（数据新鲜度，指纹零查询）、`overview`（实例总览）、`batch`（stdin 批处理，单进程共享会话）、`search --match-any`/`--limit 0`、`fields --search` 跨表列搜索、全命令 `--format markdown`
-> v0.2 占位命令（已注册签名、尚未实现，调用返回 `not_implemented` exit 1）：
-> `freshness --db D [--table T]… [--max-tables 20] [--sample]`、`overview [--top 10]`、`batch`（stdin 逐行子命令）。
+- **v0.2 新增**：`freshness`（数据新鲜度，指纹零查询）、`overview`（实例总览）、`batch`（stdin 批处理，单进程共享会话）、`search --match-any`/`--limit 0`、`fields --search` 跨表列搜索、全命令 `--format markdown`、`query --param` 自动声明模板变量（template-tags，含类型推断）
 
 真实示例（对测试实例）：
 

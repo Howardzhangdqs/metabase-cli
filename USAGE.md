@@ -34,7 +34,7 @@ mbcli 是面向 **AI Agent / 自动化脚本**的 Metabase 命令行客户端：
 | **稳定退出码** | `0` 成功 / `1` API 与执行错误 / `2` 用法错误 |
 | **稳定字段名** | 输出字段为 snake_case **白名单**（固化于 `models.py`），Metabase 上游新增字段不会混入输出 |
 | **只读定位** | 无任何管理/写命令；`query` 默认拒绝非 SELECT 语句（词法级 write-guard） |
-| **有限命令集** | 19 个命令：health / whoami / connect / disconnect / databases list / schemas / tables / fields / query / cards run / cards show / collections list / collections show / dashboards show / search / context + v0.2 占位 freshness / overview / batch（见 §5.17） |
+| **有限命令集** | 19 个命令：health / whoami / connect / disconnect / databases list / schemas / tables / fields / query / cards run / cards show / collections list / collections show / dashboards show / search / context + v0.2 新增 freshness / overview / batch（见 §5.17） |
 
 ---
 
@@ -57,16 +57,18 @@ uv run mbcli --help
 
 ### 2.1 单文件脚本（免安装）
 
-仓库根目录的 `mbcli.py` 是把整个项目合并而成的**单文件脚本**（生成物，**不入库**——从 GitHub Releases 下载）：适合无法安装包的机器。依赖不打包——使用目标机自带的库：
+`dist/mbcli.py` 是把整个项目合并而成的**单文件脚本**（生成物，**不入库**——`dist/` 已 gitignore，从 GitHub Releases 下载）：适合无法安装包的机器。文件头带 **PEP 723 依赖元数据**，`uv run` 自动准备依赖，零额外参数；纯 Python 运行时依赖目标机自带的库：
 
 ```bash
-# 目标机要求：Python >= 3.10 + pip install typer httpx（rich 由 typer 携带）
-python3 mbcli.py --help
+# 推荐：PEP 723 元数据 → uv 自动安装 typer>=0.12 / httpx>=0.27，无需 --with
+uv run mbcli.py --help
+
+# 或用目标机自带依赖（要求 Python >= 3.10 + pip install typer httpx；rich 由 typer 携带）
 python3 mbcli.py connect --url https://metabase.example.com --username me@example.com
 python3 mbcli.py query --native "SELECT 1 AS one"     # 与安装版用法完全等价
 ```
 
-重新生成：`python3 scripts/build-single.py`（需在装有 typer/httpx 的环境运行，如 `uv run python scripts/build-single.py`）。⚠️ `mbcli.py` 是生成物，**勿手改**：请修改 `src/mbcli/` 后重新生成。
+重新生成：`python3 scripts/build-single.py`（需在装有 typer/httpx 的环境运行，如 `uv run python scripts/build-single.py`；生成器自带自检——模块清单完整性、`--help`、保留字金丝雀与真实错误路径冒烟）。⚠️ `dist/mbcli.py` 是生成物，**勿手改**：请修改 `src/mbcli/` 后重新生成。
 
 ---
 
@@ -394,7 +396,7 @@ mbcli query --native SQL [--db <id|name>] [--param k=v]… [--allow-write]
 |---|---|---|---|
 | `--native` | str | **必填** | SQL 文本；写保护在任何网络动作**之前**执行 |
 | `--db` | str | 无 | 库 id 或 name（缺省库回退链同上） |
-| `--param` | str（可重复） | 无 | 模板变量 `k=v`（值原样字符串）；**仅支持 variable 目标**；缺 `=` 或空 k → exit 2 |
+| `--param` | str（可重复） | 无 | 模板变量 `k=v`（值原样字符串）；**仅支持 variable 目标**；缺 `=` 或空 k → exit 2。v0.2 起自动为每个 `--param` 声明 `template-tags`（含独立 uuid id），参数对象也带稳定 `id`——不声明会被服务端 400 拒绝（`missing required parameters`）；标签类型按值形状推断：数字→`number`（替换不带引号）、ISO 日期→`date`、其余→`text` |
 | `--allow-write` | flag | 关 | 绕过写保护（自担风险） |
 | `--format` | | json | 四种格式均支持 |
 | `--max-rows` | int ≥0 | 1000 | 客户端截断；`0` = 不限 |
@@ -433,7 +435,7 @@ mbcli cards run CARD_ID [--param k=v]… [--format FMT] [--max-rows N] [--out FI
 | 选项 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `card_id` | int | **必填**（位置参数） | 卡片 id |
-| `--param` | str（可重复） | 无 | 同 query（variable 目标） |
+| `--param` | str（可重复） | 无 | 同 query 的 `k=v` 文法；v0.2 起自动映射到卡片**声明的参数 id**：卡片 `parameters` 按 name/slug 匹配（复用其 id/type/target），native 模板变量按 tag 名匹配（复用 tag id）；未匹配的参数退化为新生成 id + category variable 目标。带 `--param` 时会先 `GET /api/card/{id}` 读取定义 |
 | 其余 | | | 同 query 的塑形选项 |
 
 ```bash
@@ -662,9 +664,9 @@ printf 'databases list\ntables --db 15 --match fut\nsearch 手机 --limit 2\n' |
 
 行内错误不中断批次（该行 `exit`/`error` 记录，进程退出码任一非 0 则 1）；禁止嵌套 `batch`；行内不支持根级选项（连接配置走环境变量/配置文件）。
 
-### 5.17 v0.2 占位命令：`freshness` / `overview` / `batch`
+### 5.17 v0.2 新命令：`freshness` / `overview` / `batch`
 
-v0.2 已**注册**以下命令的完整选项签名（可 `--help` 查看），但实现分批交付——当前调用立即返回 `not_implemented`（exit 1，stderr JSON），**不是**用法错误（exit 2）：
+以下命令自 v0.2.0 起**已全部实装**（早期占位阶段的 `not_implemented` 固定返回已移除）：
 
 ```
 mbcli freshness --db <id|name> [--table T]… [--max-tables 20] [--sample] [--format …] [--fields …] [--out F]
@@ -672,15 +674,16 @@ mbcli overview [--top 10] [--format …] [--out F]
 mbcli batch < stdin    # 每行一条子命令 argv，输出 NDJSON
 ```
 
-| 命令 | 用途（规划） | 关键选项 |
+| 命令 | 用途 | 关键选项 |
 |---|---|---|
 | `freshness` | 每表时间列 min/max 数据新鲜度；优先读字段指纹（零查询），无指纹且 `--sample` 才发 `SELECT MIN(\`col\`), MAX(\`col\`)` | `--db`（缺省库回退）、`--table`（可重复）、`--max-tables`（默认 20，防查询风暴）、`--sample` |
 | `overview` | 实例总览：库×表数、非个人顶层集合内容分布、最近更新 | `--top`（默认 10） |
-| `batch` | 单进程多命令（消 uv 冷启动），stdout 每命令一行 NDJSON | — |
+| `batch` | 单进程多命令（消 uv 冷启动），stdout 每命令一行 NDJSON `{"index","argv","exit","error","result"}` | — |
 
 ```bash
-mbcli freshness --db 15        # {"error":{"code":"not_implemented",…}} exit 1（wave 2 实装）
+mbcli freshness --db 15                 # [{"table","table_id","column","min","max","source":"fingerprint|sample|none","reason"}]
 mbcli overview --top 20
+printf 'tables --db 15 --match fut\nfields --table 3258\n' | mbcli batch
 ```
 
 ---
@@ -718,7 +721,6 @@ stderr 单行 JSON（`ensure_ascii=False`）：
 | `unhealthy` | 1 | health 非 ok |
 | `ambiguous_ref` | 1 | 名称多命中（detail 列候选 id，改用数字 id） |
 | `invalid_response` | 1 | 响应不是预期 JSON 结构 |
-| `not_implemented` | 1 | v0.2 占位命令（freshness/overview/batch）实装前的固定返回 |
 | `invalid_args` | **2** | 参数用法错误（typer 层 + 业务校验） |
 | `write_blocked` | **2** | 非 SELECT 被拦（detail 提示加 `--allow-write`） |
 

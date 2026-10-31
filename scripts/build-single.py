@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Amalgamate src/mbcli/ into the single-file mbcli.py (stdlib only).
+"""Amalgamate src/mbcli/ into the single-file dist/mbcli.py (stdlib only).
 
-The layered source tree stays canonical and fully tested; mbcli.py at the
-repo root is a *generated* artifact for machines that cannot install the
-package but have their own Python >= 3.10 with typer + httpx available.
-Dependencies are NOT bundled — the script uses whatever the target machine
-provides.
+The layered source tree stays canonical and fully tested; dist/mbcli.py is a
+*generated* artifact (never committed — dist/ is gitignored) for machines
+that cannot install the package. The generated file carries PEP 723 inline
+metadata, so `uv run dist/mbcli.py …` provisions typer+httpx automatically;
+a plain `python3` with the deps preinstalled works too.
 
 Transform per module (merged in dependency order; src has no import cycles):
   - strip the module docstring and `from __future__ import annotations`
@@ -22,11 +22,21 @@ Transform per module (merged in dependency order; src has no import cycles):
   - drop any `if __name__ == "__main__":` guard; a single one is re-emitted
     at the merged tail.
 
-Self-checks (any failure exits 1):
+Self-checks (any failure exits 1; network-dependent checks SKIP with a
+warning instead of failing):
+  0. MODULES covers every src/mbcli/**/*.py exactly (no missing, no stale) —
+     the v0.2.0 P0 incident (MODULES lacked `reserved`, shipping a mbcli.py
+     that crashed with NameError on `fields --search` / bad-query errors)
+     came from exactly this silent gap;
   1. the generated source parses with ast.parse;
   2. zero occurrences of `from mbcli` / `import mbcli` / `from .` anywhere
      in the generated file;
-  3. `mbcli.py --help` exits 0 under the current interpreter.
+  3. `dist/mbcli.py --help` exits 0 under the current interpreter;
+  4. runtime canary: import the generated file and call the merged
+     `is_reserved` / `find_reserved_token` (guards the same P0 class);
+  5. live error-path smoke (only when MB_URL + credentials are in the
+     environment): a real bad query must exit 1 with single-line JSON
+     `error.code == "bad_query"` on stderr — no traceback.
 
 Output is deterministic: fixed module order, sorted shim names, and the
 header timestamp comes from SOURCE_DATE_EPOCH when set, otherwise from the
@@ -36,24 +46,29 @@ newest source mtime (stable across back-to-back regenerations).
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src" / "mbcli"
-OUT = REPO / "mbcli.py"
+OUT = REPO / "dist" / "mbcli.py"
 
 # Dependency order (layered architecture, DESIGN.md §3): leaf modules first,
 # commands/*.py in registration order, cli.py last (it imports all commands).
+# `reserved` must precede `client`/`commands.fields` — both import from it
+# (client: find_reserved_token; fields: is_reserved).
 MODULES = [
     "errors",
     "config",
     "auth",
     "guard",
+    "reserved",
     "models",
     "output",
     "client",
@@ -80,6 +95,10 @@ MODULES = [
 
 FORBIDDEN = re.compile(r"from mbcli|import mbcli|from \.")
 
+# Live error-path smoke (self-check 5): session cache must live in the
+# build sandbox, and be cleaned up after the check.
+SMOKE_SESSION_CACHE = "/tmp/opencode/build-check-session.json"
+
 
 class BuildError(Exception):
     """Fatal amalgamation problem (generator or source shape changed)."""
@@ -87,6 +106,42 @@ class BuildError(Exception):
 
 def module_file(rel: str) -> Path:
     return SRC / Path(*rel.split(".")).with_suffix(".py")
+
+
+def discovered_modules() -> set[str]:
+    """Every source module that must be amalgamated (P0 治本 A).
+
+    `__init__.py` files are excluded here: src/mbcli/__init__.py only carries
+    __version__ (folded into the header by read_version()) and
+    commands/__init__.py is docstring-only (check_commands_init()).
+    """
+    actual: set[str] = set()
+    for path in SRC.rglob("*.py"):
+        if "__pycache__" in path.parts or path.name == "__init__.py":
+            continue
+        actual.add(path.relative_to(SRC).with_suffix("").as_posix().replace("/", "."))
+    return actual
+
+
+def check_modules_complete() -> None:
+    """MODULES must cover every source module — no missing, no stale, no dupes.
+
+    The v0.2.0 P0 incident: `reserved` was added to src/ but never to MODULES,
+    so the merged file crashed with NameError (is_reserved / find_reserved_token)
+    on `fields --search` and on bad-query error rendering. This gate turns that
+    silent class of drift into a loud build failure.
+    """
+    actual = discovered_modules()
+    listed = set(MODULES)
+    if missing := sorted(actual - listed):
+        raise BuildError(
+            f"MODULES is missing source modules (their code would be silently "
+            f"dropped from the amalgam — v0.2.0 P0): {missing}"
+        )
+    if stale := sorted(listed - actual):
+        raise BuildError(f"MODULES lists nonexistent modules (deleted/renamed src?): {stale}")
+    if len(MODULES) != len(listed):
+        raise BuildError("MODULES contains duplicate entries")
 
 
 def import_kind(node: ast.ImportFrom | ast.Import) -> str:
@@ -415,17 +470,25 @@ def assemble(
     froms: dict[str, list[str]],
     sections: list[list[str]],
 ) -> list[str]:
+    # PEP 723 inline script metadata (before any code): lets `uv run
+    # dist/mbcli.py …` provision typer/httpx with zero flags. Plain
+    # `python3` with preinstalled deps keeps working as before.
     head = [
         "#!/usr/bin/env python3",
+        "# /// script",
+        '# requires-python = ">=3.10"',
+        '# dependencies = ["typer>=0.12", "httpx>=0.27"]',
+        "# ///",
         '"""mbcli 单文件脚本 —— 由 scripts/build-single.py 自动生成，请勿手改。',
         "",
         "源码 src/mbcli/ 为权威实现（测试与开发都在源码上进行）。",
         "",
-        "目标机要求：Python >= 3.10，且已安装 typer>=0.12 与 httpx>=0.27",
-        "（rich 由 typer 携带，仅 --format table 需要；依赖不随本文件打包，",
-        "直接使用目标机自带的库）。",
+        "推荐运行：uv run dist/mbcli.py …（PEP 723 元数据在文件头，uv 自动准备",
+        "typer>=0.12 与 httpx>=0.27，无需任何 --with 标志；rich 由 typer 携带，",
+        "仅 --format table 需要）。",
         "",
-        "用法：python3 mbcli.py …（与安装版 mbcli 命令完全等价）。",
+        "或用目标机自带依赖直接运行：python3 dist/mbcli.py …",
+        "（要求 Python >= 3.10 且已安装 typer/httpx；与安装版 mbcli 命令完全等价）。",
         "",
         "重新生成：uv run python scripts/build-single.py（修改 src/ 后必须重新生成；需在装有 typer/httpx 的环境运行）。",
         "",
@@ -551,19 +614,161 @@ def self_checks(text: str, deferred: list[str]) -> None:
         raise BuildError(f"--help self-check failed ({proc.returncode}):\n{proc.stderr}")
 
 
+def canary_check() -> None:
+    """Self-check 4 (P0 治本 B): exercise the merged reserved-word helpers.
+
+    `--help` only proves registration imports succeed — the v0.2.0 P0 crash
+    (NameError: is_reserved / find_reserved_token) lived in code paths --help
+    never touches. This canary imports the generated file and calls both
+    helpers with known-answer inputs (same tokens the live commands hit).
+    """
+    code = "\n".join(
+        [
+            "import importlib.util as iu, sys",
+            f"spec = iu.spec_from_file_location('mbcli_single', {str(OUT)!r})",
+            "mod = iu.module_from_spec(spec)",
+            "sys.modules['mbcli_single'] = mod  # @dataclass resolution needs the entry",
+            "spec.loader.exec_module(mod)",
+            'assert mod.is_reserved("date") is True, "is_reserved(date) must be True"',
+            'assert mod.is_reserved("not_a_reserved_word") is False, "negative control failed"',
+            "got = mod.find_reserved_token(\"syntax error near 'year_month' at position 1\")",
+            'assert got == "year_month", f"find_reserved_token -> {got!r}"',
+            'assert mod.find_reserved_token("no quoted tokens here") is None',
+            "print(1)",
+        ]
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BuildError("reserved-word canary timed out") from exc
+    if proc.returncode != 0:
+        raise BuildError(f"reserved-word canary failed:\n{proc.stderr}")
+
+
+# Errors that mean "the build ENVIRONMENT cannot run this smoke" (network
+# unreachable, no credentials, transient server-side auth trouble, the
+# smoke db id absent on this instance) — none of them say anything about
+# the generated file, so they SKIP with a warning instead of failing.
+SMOKE_SKIP_CODES = {
+    "auth_failed",
+    "request_failed",
+    "network_error",
+    "timeout",
+    "rate_limited",
+    "server_error",
+    "unhealthy",
+    "not_found",
+    "invalid_response",
+}
+
+
+def live_error_smoke() -> None:
+    """Self-check 5 (P0 治本 C): a REAL bad query must render as JSON, not crash.
+
+    Runs `dist/mbcli.py query --db $MBCLI_SMOKE_DB --native "SELECT * FROM
+    no_such_table_xyz_abc"` against the instance configured via
+    MB_URL/MB_USERNAME/MB_PASSWORD (or MB_API_KEY) and asserts: exit 1 AND
+    stderr is single-line JSON with error.code == "bad_query" — the exact
+    path that crashed with NameError: find_reserved_token in v0.2.0. The db
+    must EXIST on the instance for the query to reach the SQL layer (a
+    missing db id yields server_error/not_found, which skips); default 15 =
+    the reference instance's quant_data. Requires no network writes: a
+    failing SELECT only, session cache isolated under /tmp/opencode and
+    removed afterwards. Skips (warning, not failure) when the build
+    environment has no credentials or cannot reach the instance.
+    """
+    env_url = os.environ.get("MB_URL", "").strip()
+    has_creds = bool(os.environ.get("MB_API_KEY")) or bool(
+        os.environ.get("MB_USERNAME") and os.environ.get("MB_PASSWORD")
+    )
+    if not env_url or not has_creds:
+        print(
+            "build-single: SKIP live error-path smoke "
+            "(MB_URL/credentials not set in build environment)"
+        )
+        return
+    smoke_db = os.environ.get("MBCLI_SMOKE_DB", "15")
+    env = dict(os.environ)
+    env["MB_SESSION_CACHE"] = SMOKE_SESSION_CACHE  # never touch the dev's cache
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(OUT),
+                "--url",
+                env_url,
+                "query",
+                "--db",
+                smoke_db,
+                "--native",
+                "SELECT * FROM no_such_table_xyz_abc",
+            ],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print("build-single: SKIP live error-path smoke (timed out — network unavailable?)")
+        return
+    finally:
+        Path(SMOKE_SESSION_CACHE).unlink(missing_ok=True)
+    stderr_lines = [line for line in proc.stderr.splitlines() if line.strip()]
+    parsed: dict[str, Any] | None = None
+    if len(stderr_lines) == 1:
+        try:
+            candidate = json.loads(stderr_lines[0])
+            if isinstance(candidate, dict) and set(candidate) == {"error"}:
+                parsed = candidate
+        except ValueError:
+            parsed = None
+    if parsed is not None:
+        code = parsed["error"].get("code")
+        if proc.returncode == 1 and code == "bad_query":
+            print("build-single: live error-path smoke passed (bad_query JSON, no traceback)")
+            return
+        if code in SMOKE_SKIP_CODES:
+            print(
+                f"build-single: SKIP live error-path smoke "
+                f"(environment error from instance: {code})"
+            )
+            return
+    raise BuildError(
+        f"live error-path smoke failed: expected exit 1 + single-line JSON "
+        f"error.code=bad_query, got exit {proc.returncode}, "
+        f"stderr={proc.stderr[:500]!r}"
+    )
+
+
 def main() -> int:
     try:
         check_commands_init()
+        check_modules_complete()  # P0 治本 A: MODULES must cover every source module
         deferred: list[str] = []
         text = build(deferred)
+        OUT.parent.mkdir(parents=True, exist_ok=True)
         OUT.write_text(text, encoding="utf-8")
         self_checks(text, deferred)
+        canary_check()  # P0 治本 B: merged reserved-word helpers actually callable
+        live_error_smoke()  # P0 治本 C: real bad query → JSON error, never a traceback
     except (BuildError, OSError, SyntaxError, ValueError) as exc:
         print(f"build-single: FAIL: {exc}", file=sys.stderr)
         return 1
     lines = text.count("\n")
-    print(f"build-single: wrote {OUT.name}: {len(text.encode('utf-8'))} bytes, {lines} lines")
-    print(f"build-single: merged {len(MODULES)} modules; self-checks passed (parse/refs/--help)")
+    print(f"build-single: wrote {OUT}: {len(text.encode('utf-8'))} bytes, {lines} lines")
+    print(
+        f"build-single: merged {len(MODULES)} modules; "
+        "self-checks passed (manifest/parse/refs/--help/canary/live-smoke-or-skip)"
+    )
     return 0
 
 

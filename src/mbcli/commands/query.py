@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
+from uuid import uuid4
 
 import typer
 
@@ -24,15 +26,32 @@ EPILOG = (
 )
 
 
-def native_parameters(params: list[str] | None) -> list[dict[str, Any]]:
-    """Serialize repeatable `--param k=v` options into dataset parameters.
+# ISO 8601 date or datetime (2023-07-01 / 2023-07-01T08:00 / 2023-07-01 08:00:30+08:00)
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?")
 
-    M2 scope (DESIGN §4): native template VARIABLES only — every param maps to
-    {"type":"category","target":["variable",["template-tag",k]],"value":v}.
+
+def infer_tag_type(value: str) -> str:
+    """Template-tag type from the value's shape (v0.2, live-verified on 47.100.241.247).
+
+    Matrix probed against POST /api/dataset: numeric → "number" (substituted
+    unquoted), ISO date/datetime → "date", anything else → "text" (quoted).
+    """
+    if _ISO_DATE.fullmatch(value.strip()):
+        return "date"
+    try:
+        float(value.strip())
+    except ValueError:
+        return "text"
+    return "number"
+
+
+def parse_param_items(params: list[str] | None) -> list[tuple[str, str]]:
+    """Validate repeatable `--param k=v` options → [(key, value), …] (no I/O).
+
     The value is passed through verbatim (always a string); `k` may not be
     empty and the `k=v` shape is mandatory (invalid_args, exit 2).
     """
-    parameters: list[dict[str, Any]] = []
+    items: list[tuple[str, str]] = []
     for item in params or []:
         key, sep, value = item.partition("=")
         if not sep or not key:
@@ -41,10 +60,52 @@ def native_parameters(params: list[str] | None) -> list[dict[str, Any]]:
                 f"invalid --param {item!r}: expected k=v",
                 detail={"param": item},
             )
+        items.append((key, value))
+    return items
+
+
+def native_param_specs(
+    params: list[str] | None,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Serialize `--param k=v` into a (parameters, template-tags) pair (v0.2).
+
+    M2 sent only `parameters` with `native.template-tags` pinned empty, which
+    the server rejects for any referenced variable: 400
+    ``Cannot run the query: missing required parameters: #{"n"}``. Live probing
+    (v0.2.0 eval) established the accepted shape — the tag must be DECLARED
+    alongside the parameter, each with a stable id:
+
+    - parameters: ``[{"id": <uuid>, "type": "category",
+        "target": ["variable", ["template-tag", k]], "value": v}]``
+      ("category" matches text/number/date tags alike; "text"/"number"/"date"
+      param types are also accepted, "date" alone is not);
+    - template-tags: ``{k: {"id": <uuid>, "name": k, "display-name": k,
+        "type": "text"|"number"|"date", "required": False}}`` — tag ids are
+      REQUIRED by the server (a date tag without id → same 400), separate
+      uuid from the parameter id (both probed OK).
+
+    Type is inferred from the value's shape (see infer_tag_type); mbcli never
+    rewrites the SQL (ADR #4) — only variable targets, per DESIGN §4.
+    """
+    parameters: list[dict[str, Any]] = []
+    template_tags: dict[str, dict[str, Any]] = {}
+    for key, value in parse_param_items(params):
         parameters.append(
-            {"type": "category", "target": ["variable", ["template-tag", key]], "value": value}
+            {
+                "id": str(uuid4()),
+                "type": "category",
+                "target": ["variable", ["template-tag", key]],
+                "value": value,
+            }
         )
-    return parameters
+        template_tags[key] = {
+            "id": str(uuid4()),
+            "name": key,
+            "display-name": key,
+            "type": infer_tag_type(value),
+            "required": False,
+        }
+    return parameters, template_tags
 
 
 def envelope_from_payload(payload: Any, max_rows: int) -> QueryEnvelope:
@@ -85,7 +146,7 @@ def query(
 ) -> None:
     """执行原生 SQL（默认只读；服务端忽略请求级限量，--max-rows 为客户端截断）。"""
     guard.check_readonly(native, allow_write)  # before ANY config/network work (§3.4)
-    parameters = native_parameters(param)  # cheap validation, no I/O
+    parameters, template_tags = native_param_specs(param)  # cheap validation, no I/O
     state = state_from_ctx(ctx)
     config = state.load_config()
     db_ref = effective_db_ref(db, config)
@@ -96,7 +157,7 @@ def query(
             {
                 "database": db_id,
                 "type": "native",
-                "native": {"query": native, "template-tags": {}},
+                "native": {"query": native, "template-tags": template_tags},
                 "parameters": parameters,
             },
         )

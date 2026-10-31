@@ -9,6 +9,7 @@ Offline only (respx); no test touches the network.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 import httpx
@@ -564,18 +565,26 @@ def test_query_params_serialize_into_body(cli, mock_api):
         "--param",
         "city=上海",
     ).assert_ok(0)
-    assert sent_body(route)["parameters"] == [
-        {
-            "type": "category",
-            "target": ["variable", ["template-tag", "dt"]],
-            "value": "2024-01-01",
-        },
-        {
-            "type": "category",
-            "target": ["variable", ["template-tag", "city"]],
-            "value": "上海",
-        },
-    ]
+    body = sent_body(route)
+    # parameters: id (stable uuid, v0.2) + type/target/value per DESIGN §4
+    assert [p["type"] for p in body["parameters"]] == ["category", "category"]
+    for param, key, value in zip(
+        body["parameters"], ("dt", "city"), ("2024-01-01", "上海"), strict=True
+    ):
+        assert set(param) == {"id", "type", "target", "value"}
+        assert uuid.UUID(param["id"])  # server-accepted shape: id must be present
+        assert param["target"] == ["variable", ["template-tag", key]]
+        assert param["value"] == value
+    # template-tags: every referenced variable must be declared (v0.2 live fix)
+    tags = body["native"]["template-tags"]
+    assert set(tags) == {"dt", "city"}
+    assert tags["dt"]["type"] == "date"  # 2024-01-01 → ISO date
+    assert tags["city"]["type"] == "text"  # 上海 → text
+    for key, tag in tags.items():
+        assert set(tag) == {"id", "name", "display-name", "type", "required"}
+        assert tag["name"] == key and tag["display-name"] == key
+        assert tag["required"] is False
+        uuid.UUID(tag["id"])
 
 
 def test_query_param_value_may_contain_equals(cli, mock_api):
@@ -593,9 +602,9 @@ def test_query_param_value_may_contain_equals(cli, mock_api):
         "--param",
         "k=a=b",
     ).assert_ok(0)
-    assert sent_body(route)["parameters"] == [
-        {"type": "category", "target": ["variable", ["template-tag", "k"]], "value": "a=b"}
-    ]
+    body = sent_body(route)
+    assert [p["value"] for p in body["parameters"]] == ["a=b"]
+    assert body["native"]["template-tags"]["k"]["type"] == "text"
 
 
 @pytest.mark.parametrize("bad", ["noequals", "=v", ""])
@@ -674,15 +683,34 @@ def test_cards_run_post_body_shape(cli, mock_api):
 
 def test_cards_run_params_in_body(cli, mock_api):
     route = mock_card_query(mock_api, 7876, dataset_payload([[1, "x"]]))
+    # card 7876 declares no parameters → fallback spec (fresh uuid + category)
+    mock_api.get(f"{BASE}/api/card/7876").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 7876,
+                "name": "数据日期",
+                "parameters": [],
+                "dataset_query": {
+                    "database": 15,
+                    "type": "native",
+                    "native": {"query": "select 1", "template-tags": {}},
+                },
+            },
+        )
+    )
     cli("--url", BASE, "--api-key", "k", "cards", "run", "7876", "--param", "city=上海").assert_ok(
         0
     )
-    assert sent_body(route) == {
-        "parameters": [
-            {"type": "category", "target": ["variable", ["template-tag", "city"]], "value": "上海"}
-        ],
-        "ignore_cache": False,
-    }
+    body = sent_body(route)
+    assert body["ignore_cache"] is False
+    assert len(body["parameters"]) == 1
+    param = body["parameters"][0]
+    assert set(param) == {"id", "type", "target", "value"}
+    assert uuid.UUID(param["id"])
+    assert param["type"] == "category"
+    assert param["target"] == ["variable", ["template-tag", "city"]]
+    assert param["value"] == "上海"
 
 
 def test_cards_run_envelope_golden(cli, mock_api):

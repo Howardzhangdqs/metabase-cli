@@ -107,16 +107,16 @@ def test_usage_errors_exit_2_with_invalid_args_json(cli, argv):
 
 def test_root_options_before_subcommand_work(cli, mock_api):
     route = mock_whoami(mock_api)
-    cli("--url", BASE, "--api-key", "secret-key", "whoami").assert_ok(0)
-    assert route.calls.last.request.headers["X-API-Key"] == "secret-key"
+    cli("--url", BASE, "--api-key", "key", "whoami").assert_ok(0)
+    assert route.calls.last.request.headers["X-API-Key"] == "key"
 
 
 def test_root_options_via_environment(cli, mock_api, monkeypatch):
     monkeypatch.setenv("MB_URL", BASE)
-    monkeypatch.setenv("MB_API_KEY", "env-key")
+    monkeypatch.setenv("MB_API_KEY", "key2")
     route = mock_whoami(mock_api)
     cli("whoami").assert_ok(0)
-    assert route.calls.last.request.headers["X-API-Key"] == "env-key"
+    assert route.calls.last.request.headers["X-API-Key"] == "key2"
 
 
 def test_no_color_flag_accepted(cli, mock_api):

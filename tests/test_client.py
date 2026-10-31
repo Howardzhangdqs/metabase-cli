@@ -345,8 +345,8 @@ def test_verbose_log_redacts_body_password(mock_api):
         retry_backoffs=(),
     )
     mock_api.post(f"{BASE}/api/dataset").mock(return_value=httpx.Response(200, json={}))
-    client.post_json("/api/dataset", {"native": {"query": "SELECT 1"}, "password": "hunter2"})
+    client.post_json("/api/dataset", {"native": {"query": "SELECT 1"}, "password": "pw"})
     joined = "\n".join(lines)
     assert "POST /api/dataset" in joined
-    assert "hunter2" not in joined
+    assert "pw" not in joined
     assert '"password": "***"' in joined

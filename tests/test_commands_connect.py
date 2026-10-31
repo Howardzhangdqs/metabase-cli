@@ -137,7 +137,7 @@ def write_connection(
     *,
     url: str = BASE,
     username: str | None = "u@example.com",
-    password: str | None = "hunter2",
+    password: str | None = "pw",
     api_key: str | None = None,
     default_db: str | None = None,
 ) -> None:
@@ -169,7 +169,7 @@ def test_connect_password_mode_writes_toml_and_clears_cache(cli, mock_api, cfg_f
         "--username",
         "u@example.com",
         "--password",
-        "hunter2",
+        "pw",
         "--non-interactive",
     ).assert_ok(0)
     assert result.json() == {
@@ -182,7 +182,7 @@ def test_connect_password_mode_writes_toml_and_clears_cache(cli, mock_api, cfg_f
     }
     # exact [metabase] section (key order: url, username, password)
     assert cfg_file.read_text(encoding="utf-8") == (
-        '[metabase]\nurl = "http://test.local"\nusername = "u@example.com"\npassword = "hunter2"\n'
+        '[metabase]\nurl = "http://test.local"\nusername = "u@example.com"\npassword = "pw"\n'
     )
     assert stat.S_IMODE(cfg_file.stat().st_mode) == 0o600
     assert stat.S_IMODE(cfg_file.parent.stat().st_mode) == 0o700
@@ -193,11 +193,11 @@ def test_connect_password_mode_writes_toml_and_clears_cache(cli, mock_api, cfg_f
 def test_connect_api_key_mode_skips_login(cli, mock_api, cfg_file):
     login = mock_login(mock_api)
     whoami = mock_whoami(mock_api)
-    cli("connect", "--url", BASE, "--api-key", "secret-key", "--non-interactive").assert_ok(0)
+    cli("connect", "--url", BASE, "--api-key", "key", "--non-interactive").assert_ok(0)
     assert login.call_count == 0
-    assert whoami.calls.last.request.headers["X-API-Key"] == "secret-key"
+    assert whoami.calls.last.request.headers["X-API-Key"] == "key"
     assert cfg_file.read_text(encoding="utf-8") == (
-        '[metabase]\nurl = "http://test.local"\napi_key = "secret-key"\n'
+        '[metabase]\nurl = "http://test.local"\napi_key = "key"\n'
     )
 
 
@@ -210,7 +210,7 @@ def test_connect_root_level_flags_honored(cli, mock_api, cfg_file):
         "--username",
         "u@example.com",
         "--password",
-        "hunter2",
+        "pw",
         "connect",
         "--non-interactive",
     ).assert_ok(0)
@@ -222,8 +222,8 @@ def test_connect_env_fills_missing_values(cli, mock_api, cfg_file, monkeypatch):
     mock_whoami(mock_api)
     monkeypatch.setenv("MB_URL", BASE)
     monkeypatch.setenv("MB_USERNAME", "u@example.com")
-    cli("connect", "--password", "hunter2", "--non-interactive").assert_ok(0)
-    assert "hunter2" in cfg_file.read_text(encoding="utf-8")
+    cli("connect", "--password", "pw", "--non-interactive").assert_ok(0)
+    assert "pw" in cfg_file.read_text(encoding="utf-8")
 
 
 # -- connect: validation before save ------------------------------------------------------
@@ -350,7 +350,7 @@ def test_connect_prompts_for_url_username_hidden_password(cli, mock_api, cfg_fil
     mock_login(mock_api)
     mock_whoami(mock_api)
     calls: list[tuple[str, dict]] = []
-    answers = {"Metabase URL": BASE, "Username": "u@example.com", "Password": "hunter2"}
+    answers = {"Metabase URL": BASE, "Username": "u@example.com", "Password": "pw"}
 
     def fake_prompt(text: str = "", **kwargs):
         calls.append((text, kwargs))
@@ -360,7 +360,7 @@ def test_connect_prompts_for_url_username_hidden_password(cli, mock_api, cfg_fil
     cli("connect").assert_ok(0)
     assert [text for text, _ in calls] == ["Metabase URL", "Username", "Password"]
     assert calls[2][1].get("hide_input") is True  # password input is hidden
-    assert "hunter2" in cfg_file.read_text(encoding="utf-8")
+    assert "pw" in cfg_file.read_text(encoding="utf-8")
 
 
 def test_connect_prompts_only_missing_password(cli, mock_api, cfg_file, monkeypatch):
@@ -372,7 +372,7 @@ def test_connect_prompts_only_missing_password(cli, mock_api, cfg_file, monkeypa
 
     def fake_prompt(text: str = "", **kwargs):
         calls.append((text, kwargs))
-        return "hunter2"
+        return "pw"
 
     monkeypatch.setattr("typer.prompt", fake_prompt)
     cli("connect").assert_ok(0)
@@ -548,20 +548,20 @@ def test_connect_non_interactive_env_only_password_mode(cli, mock_api, cfg_file,
     mock_whoami(mock_api)
     monkeypatch.setenv("MB_URL", BASE)
     monkeypatch.setenv("MB_USERNAME", "u@example.com")
-    monkeypatch.setenv("MB_PASSWORD", "hunter2")
+    monkeypatch.setenv("MB_PASSWORD", "pw")
     result = cli("connect", "--non-interactive").assert_ok(0)
     assert result.json()["connected"] is True
-    assert 'password = "hunter2"' in cfg_file.read_text(encoding="utf-8")
+    assert 'password = "pw"' in cfg_file.read_text(encoding="utf-8")
 
 
 def test_connect_non_interactive_env_only_api_key_mode(cli, mock_api, cfg_file, monkeypatch):
     login = mock_login(mock_api)
     mock_whoami(mock_api)
     monkeypatch.setenv("MB_URL", BASE)
-    monkeypatch.setenv("MB_API_KEY", "env-key")
+    monkeypatch.setenv("MB_API_KEY", "key2")
     cli("connect", "--non-interactive").assert_ok(0)
     assert login.call_count == 0  # env key wins: session login never happens
-    assert 'api_key = "env-key"' in cfg_file.read_text(encoding="utf-8")
+    assert 'api_key = "key2"' in cfg_file.read_text(encoding="utf-8")
 
 
 def test_connect_no_prompt_when_flag_and_env_cover_everything(cli, mock_api, cfg_file, monkeypatch):
@@ -575,7 +575,7 @@ def test_connect_no_prompt_when_flag_and_env_cover_everything(cli, mock_api, cfg
         raise AssertionError(f"unexpected prompt: {text!r}")
 
     monkeypatch.setattr("typer.prompt", no_prompts)
-    cli("connect", "--password", "hunter2").assert_ok(0)
+    cli("connect", "--password", "pw").assert_ok(0)
 
 
 def test_connect_mixed_flag_and_env_fields(cli, mock_api, cfg_file, monkeypatch):
@@ -583,11 +583,11 @@ def test_connect_mixed_flag_and_env_fields(cli, mock_api, cfg_file, monkeypatch)
     mock_login(mock_api)
     mock_whoami(mock_api)
     monkeypatch.setenv("MB_URL", BASE)
-    monkeypatch.setenv("MB_PASSWORD", "hunter2")
+    monkeypatch.setenv("MB_PASSWORD", "pw")
     cli("connect", "--username", "flag-user@example.com", "--non-interactive").assert_ok(0)
     text = cfg_file.read_text(encoding="utf-8")
     assert 'username = "flag-user@example.com"' in text  # flag beats env for its field
-    assert 'password = "hunter2"' in text  # env filled the untouched field
+    assert 'password = "pw"' in text  # env filled the untouched field
 
 
 def test_connect_env_missing_password_still_prompts_hidden(cli, mock_api, cfg_file, monkeypatch):
@@ -648,7 +648,7 @@ def test_connect_verbose_never_logs_api_key(cli, mock_api, cfg_file):
 def test_connect_refuse_error_hides_stored_secrets(cli, mock_api, cfg_file):
     """The overwrite-refused error echoes only the old URL — never the stored
     username/password/api_key."""
-    write_connection(cfg_file, url="http://old.local", username="secret-user", password="secret-pw")
+    write_connection(cfg_file, url="http://old.local", username="u2", password="pw")
     mock_login(mock_api)
     mock_whoami(mock_api)
     result = cli(
@@ -663,7 +663,7 @@ def test_connect_refuse_error_hides_stored_secrets(cli, mock_api, cfg_file):
     )
     assert result.exit_code == 2
     assert "old.local" in result.stderr  # URL is fine to echo…
-    for secret in ("secret-user", "secret-pw"):
+    for secret in ("u2", "pw"):
         assert secret not in result.stderr  # …stored identity secrets are not
 
 

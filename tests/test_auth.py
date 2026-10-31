@@ -182,11 +182,11 @@ def test_login_timeout(make_config, mock_api):
 
 
 def test_login_request_body_and_session_header(make_config, mock_api):
-    config = make_config(username="alice", password="secret-pw")
+    config = make_config(username="alice", password="pw")
     route = mock_api.post(LOGIN).mock(return_value=httpx.Response(200, json={"id": "sid"}))
     AuthManager(config).auth_headers()
     sent = json.loads(route.calls.last.request.content)
-    assert sent == {"username": "alice", "password": "secret-pw"}
+    assert sent == {"username": "alice", "password": "pw"}
 
 
 # -- redaction ------------------------------------------------------------------
@@ -195,7 +195,7 @@ def test_login_request_body_and_session_header(make_config, mock_api):
 def test_redact_secrets_nested():
     value = {
         "username": "alice",
-        "password": "hunter2",
+        "password": "pw",
         "nested": [{"api_key": "k", "keep": 1}, {"X-Metabase-Session": "s"}],
     }
     redacted = redact_secrets(value)
@@ -207,6 +207,6 @@ def test_redact_secrets_nested():
 
 
 def test_redact_secrets_does_not_mutate_original():
-    value = {"password": "hunter2"}
+    value = {"password": "pw"}
     redact_secrets(value)
-    assert value["password"] == "hunter2"
+    assert value["password"] == "pw"

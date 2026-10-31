@@ -436,3 +436,20 @@ mbcli batch < stdin    # 每行一条子命令 argv，如: tables --db 15 --matc
 | 20 | batch 输出 NDJSON 包装而非拼接 stdout | 保持"stdout 只有数据"可流式解析；uv 冷启动成本摊平到多命令 |
 | 21 | 多关键词/列级搜索在客户端归并（服务端无此能力） | 反馈 #4；列搜索复用 metadata 缓存零请求 |
 | 22 | 保留字只做"生成侧反引号 + 错误侧提示"，不改写用户 SQL | 与 ADR #4（零侵入）一致 |
+
+## 14. v0.3 待办（两轮实弹评测沉淀，均为打磨级；评测循环已收敛）
+
+> 来源：R1 消费板块 7/10、R2 汽车板块 9/10（零 P0/P1 收敛）。P0/P1 类问题已全部在 v0.2.1/v0.2.2 修复。
+
+| # | 项 | 说明 | 备注 |
+|---|---|---|---|
+| 1 | 输出形状统一或速查表 | 裸数组（tables/search）vs 信封（collections show/query）并存；至少文档给形状速查 | 契约级，需设计 |
+| 2 | `tables`/元数据列表加 `--limit` 或默认截断+truncated | `--db bi_data` 倾倒 466 条刷爆上下文 | |
+| 3 | `--format table` 自适应列宽 / `--width`；浮点降噪 | 定宽 12 字符截断、`472.98760000000004` 直出 | output.py |
+| 4 | `"Not found."` 英文透传归一化 | 与结构化中文错误风格割裂 | client 错误规范化 |
+| 5 | `write_blocked` 独立退出码（如 3） | 与 invalid_args 共用 exit 2，脚本无法区分"打错字"与"被安全策略拦" | **契约变更**，需 v2 级决策 |
+| 6 | `schemas` 对 MySQL 单库空名无信息量；`context` 行数缺失时省略 `~? rows¹` 占位 | | |
+| 7 | `dashboards show` 文本/标题卡标 `type:"text"` 或过滤 | 现输出 `{card_id:null,name:null}` 行，易误判数据卡损坏 | R2 新增 |
+| 8 | `cards run` 省略已声明可选参数时 stderr 提示口径 | 裸跑=服务端省略过滤子句，与过滤结果同为 74 行易误读 | R2 新增；stderr info 不破坏契约 |
+| 9 | freshness 时间值格式归一 | DATETIME 带 ISO 时区 vs DATE 裸日期并存（实例 schema 混用所致，可文档化缓解） | R2 观察 |
+| 10 | 实例侧数据治理（非工具问题，记录） | 日期列 VARCHAR、description 全空、空壳库、卡片命名随意、同名仪表盘重复 | 反馈给实例管理员 |

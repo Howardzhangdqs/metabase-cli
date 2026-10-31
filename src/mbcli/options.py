@@ -33,6 +33,19 @@ ModelOpt = Annotated[
 ]
 
 
+def expand_models(model: list[str] | None) -> list[str]:
+    """Flatten repeatable / comma-separated --model values into a flat list.
+
+    Sent as the repeatable `models` (plural) query param — the singular `model=`
+    is silently ignored by Metabase (probe-verified, ADR #10). Shared by
+    search / collections show (single canonical copy for the amalgam build).
+    """
+    values: list[str] = []
+    for entry in model or []:
+        values.extend(part.strip() for part in entry.split(",") if part.strip())
+    return values
+
+
 @dataclass
 class CliState:
     """Values provided at the root level for one invocation."""

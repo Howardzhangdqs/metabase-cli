@@ -19,7 +19,7 @@ import typer
 from mbcli.client import MetabaseClient
 from mbcli.errors import MbcliError
 from mbcli.models import SearchItem
-from mbcli.options import ModelOpt, state_from_ctx
+from mbcli.options import ModelOpt, expand_models, state_from_ctx
 from mbcli.output import FieldsOpt, Format, FormatOpt, OutOpt, emit_records
 from mbcli.resolver import Resolver
 
@@ -34,18 +34,6 @@ EPILOG = (
     "  mbcli search 手机,mobile,phone --match-any --limit 5   # 多关键词并集去重\n"
     "  mbcli search 用户 --limit 0                            # 拉全集（页 100，上限 1000）"
 )
-
-
-def expand_models(model: list[str] | None) -> list[str]:
-    """Flatten repeatable / comma-separated --model values.
-
-    Sent as the repeatable `models` (plural) query param — the singular `model=`
-    is silently ignored by Metabase (probe-verified, ADR #10).
-    """
-    values: list[str] = []
-    for entry in model or []:
-        values.extend(part.strip() for part in entry.split(",") if part.strip())
-    return values
 
 
 def split_keywords(query: str) -> list[str]:

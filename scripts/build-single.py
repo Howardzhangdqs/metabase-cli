@@ -187,14 +187,81 @@ def collapse_blanks(lines: list[str]) -> list[str]:
     return out
 
 
-def render_shim(rel: str, names: list[str]) -> list[str]:
+def render_shim(rel: str, names: list[str], renames: dict[str, str]) -> list[str]:
     var = rel.rsplit(".", 1)[-1]
     if not names:
         return [f"{var} = _ns()"]
     lines = [f"{var} = _ns("]
-    lines += [f"    {name}={name}," for name in sorted(names)]
+    lines += [f"    {n}={renames.get(n, n)}," for n in sorted(names)]
     lines.append(")")
     return lines
+
+
+def private_renames(rel: str, names: list[str]) -> dict[str, str]:
+    """Module-private top-level names get a per-module prefix in the amalgam.
+
+    ``_finalize`` in commands.overview and output would otherwise silently
+    shadow each other in the flat namespace (merge-order last-wins)."""
+    leaf = rel.rsplit(".", 1)[-1]
+    return {
+        n: f"_{leaf}__{n}"
+        for n in names
+        if n.startswith("_") and not n.startswith("__") and len(n) > 1
+    }
+
+
+def apply_renames(lines: list[str], tree: ast.Module, renames: dict[str, str]) -> None:
+    """Rewrite identifier occurrences in place, spans derived from the AST."""
+    if not renames:
+        return
+    spans: list[tuple[int, int, int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in renames:
+            spans.append((node.lineno - 1, node.col_offset, node.end_col_offset, renames[node.id]))
+        elif (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name in renames
+        ):
+            line = lines[node.lineno - 1]
+            start = line.index(node.name, node.col_offset)
+            spans.append((node.lineno - 1, start, start + len(node.name), renames[node.name]))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                if name in renames:
+                    line = lines[node.lineno - 1]
+                    col = line.index(name, node.col_offset)
+                    spans.append((node.lineno - 1, col, col + len(name), renames[name]))
+    for li, cs, ce, new in sorted(spans, reverse=True):
+        line = lines[li]
+        lines[li] = line[:cs] + new + line[ce:]
+
+
+def rewrite_deferred_intra(
+    node: ast.AST,
+    lines: list[str],
+    drop: list[bool],
+    replace: dict[int, str],
+    deferred: list[str],
+) -> bool:
+    """Rewrite a nested single-line ``from mbcli.X import a [as b]`` in place.
+
+    Returns False for unsupported shapes so the caller keeps hard-failing.
+    ``a`` (the merged top-level name) is recorded in ``deferred``; an asname
+    binding is emitted so the function body keeps working unchanged."""
+    if not isinstance(node, ast.ImportFrom) or node.end_lineno != node.lineno:
+        return False
+    if any(alias.name == "*" or not alias.name.isidentifier() for alias in node.names):
+        return False
+    binds = [f"{alias.asname} = {alias.name}" for alias in node.names if alias.asname]
+    deferred.extend(alias.name for alias in node.names)
+    idx = node.lineno - 1
+    raw = lines[idx]
+    indent = raw[: len(raw) - len(raw.lstrip())]
+    if binds:
+        replace[idx] = indent + "; ".join(binds) + "  # merged intra alias"
+    else:
+        drop[idx] = True
+    return True
 
 
 def transform(
@@ -203,10 +270,12 @@ def transform(
     tree: ast.Module,
     plains: dict[str, str],
     froms: dict[str, list[str]],
+    deferred: list[str],
 ) -> list[str]:
     """Return the merged section (banner + code + shim) for one module."""
     lines = source.splitlines()
     drop = [False] * len(lines)
+    replace: dict[int, str] = {}
 
     def mark(node: ast.AST) -> None:
         assert isinstance(node, (ast.Import, ast.ImportFrom, ast.stmt))
@@ -243,17 +312,26 @@ def transform(
 
     # Nested imports (inside try/if/def) may only ever be external and stay
     # in place; a nested intra-package or future import would break the flat
-    # namespace, so refuse loudly instead of producing a broken amalgam.
+    # namespace, so refuse loudly instead of producing a broken amalgam —
+    # except a deferred single-line `from mbcli.X import name [as alias]`
+    # (runs at call time, when the merged top level is fully bound): rewrite
+    # it to `alias = name` and record `name` for the post-merge check.
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)) and node not in handled:
             kind = import_kind(node)
-            if kind != "external":
+            if kind != "external" and not rewrite_deferred_intra(
+                node, lines, drop, replace, deferred
+            ):
                 raise BuildError(
                     f"{rel}: unsupported nested {kind} import"
                     f" at line {node.lineno}; extend build-single.py first"
                 )
 
-    kept = collapse_blanks([line for idx, line in enumerate(lines) if not drop[idx]])
+    renames = private_renames(rel, shim_names)
+    apply_renames(lines, tree, renames)
+    kept = collapse_blanks(
+        [replace.get(idx, line) for idx, line in enumerate(lines) if not drop[idx]]
+    )
     if not kept:
         raise BuildError(f"{rel}: module contributed no code")
     relpath = module_file(rel).relative_to(REPO).as_posix()
@@ -262,7 +340,7 @@ def transform(
         f"# mbcli.{rel}  (merged: {relpath})",
         "#" + "-" * 75,
     ]
-    return banner + kept + [""] + render_shim(rel, shim_names)
+    return banner + kept + [""] + render_shim(rel, shim_names, renames)
 
 
 def read_version() -> str:
@@ -366,23 +444,98 @@ def assemble(
     return out + tail
 
 
-def build() -> str:
+def detect_public_dup_hazards(parsed: list[tuple[str, str, ast.Module]]) -> None:
+    """Fail on differing duplicate top-level names that are unsafe to flatten.
+
+    A name defined in several modules resolves last-wins in the amalgam.
+    Attribute access is shim-protected and top-level own-section references
+    execute before later rebinding, so the only hazard is a bare reference
+    inside a function body of a module that is not the last definer."""
+    defs: dict[str, list[str]] = {}
+    segs: dict[str, set[str]] = {}
+    for rel, source, tree in parsed:
+        for stmt in tree.body:
+            names: list[str] = []
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [stmt.name]
+            elif isinstance(stmt, ast.Assign):
+                names = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+            for name in names:
+                if name.startswith("_"):
+                    continue  # private names are defused by private_renames()
+                defs.setdefault(name, []).append(rel)
+                segs.setdefault(name, set()).add(ast.get_source_segment(source, stmt) or "")
+    for name, modlist in defs.items():
+        if len(modlist) < 2 or len(segs[name]) < 2:
+            continue
+        last = modlist[-1]
+        for rel, _source, tree in parsed:
+            if rel == last:
+                continue
+            for stmt in tree.body:
+                # Only function bodies resolve names at call time (last-wins).
+                # Decorators and defaults evaluate at def time within the
+                # module's own section — before later rebinding — so walk only
+                # the body statements, not the FunctionDef node itself.
+                if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for child in stmt.body:
+                    for node in ast.walk(child):
+                        if (
+                            isinstance(node, ast.Name)
+                            and node.id == name
+                            and isinstance(node.ctx, ast.Load)
+                        ):
+                            raise BuildError(
+                                f"public name {name!r} differs across {modlist}; bare reference "
+                                f"in {rel} would resolve to the last definition ({last}) — "
+                                f"rename it or access it via the module attribute"
+                            )
+
+
+def build(deferred: list[str]) -> str:
     plains: dict[str, str] = {}
     froms: dict[str, list[str]] = {}
     sections: list[list[str]] = []
+    parsed: list[tuple[str, str, ast.Module]] = []
     for rel in MODULES:
         path = module_file(rel)
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
-        sections.append(transform(rel, source, tree, plains, froms))
+        parsed.append((rel, source, tree))
+        sections.append(transform(rel, source, tree, plains, froms, deferred))
+    detect_public_dup_hazards(parsed)
     return "\n".join(assemble(read_version(), build_stamp(), plains, froms, sections)) + "\n"
 
 
-def self_checks(text: str) -> None:
-    ast.parse(text, filename=str(OUT))  # 1. parses
+def _top_level_names(tree: ast.Module) -> set[str]:
+    """All names bound at the merged module's top level (for deferred checks)."""
+    names: set[str] = set()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(stmt.name)
+        elif isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    names.update(e.id for e in target.elts if isinstance(e, ast.Name))
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            names.add(stmt.target.id)
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for alias in stmt.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
+def self_checks(text: str, deferred: list[str]) -> None:
+    tree = ast.parse(text, filename=str(OUT))  # 1. parses
     hit = FORBIDDEN.search(text)  # 2. no intra-package references survived
     if hit is not None:
         raise BuildError(f"intra-package reference survived the transform: {hit.group()!r}")
+    missing = sorted({n for n in deferred if n not in _top_level_names(tree)})
+    if missing:  # 2b. deferred intra imports resolve at run time
+        raise BuildError(f"deferred intra imports unresolvable in merged file: {missing}")
     try:  # 3. runs: registration code executes at import time
         proc = subprocess.run(
             [sys.executable, str(OUT), "--help"],
@@ -401,9 +554,10 @@ def self_checks(text: str) -> None:
 def main() -> int:
     try:
         check_commands_init()
-        text = build()
+        deferred: list[str] = []
+        text = build(deferred)
         OUT.write_text(text, encoding="utf-8")
-        self_checks(text)
+        self_checks(text, deferred)
     except (BuildError, OSError, SyntaxError, ValueError) as exc:
         print(f"build-single: FAIL: {exc}", file=sys.stderr)
         return 1

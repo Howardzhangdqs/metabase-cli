@@ -8,7 +8,7 @@ import typer
 
 from mbcli.errors import MbcliError
 from mbcli.models import CollectionInfo, CollectionItem, CollectionListing
-from mbcli.options import ModelOpt, state_from_ctx
+from mbcli.options import ModelOpt, expand_models, state_from_ctx
 from mbcli.output import (
     FieldsOpt,
     Format,
@@ -22,18 +22,6 @@ from mbcli.output import (
 from mbcli.resolver import Resolver
 
 app = typer.Typer(help="浏览集合及其内容。", no_args_is_help=True)
-
-
-def expand_models(model: list[str] | None) -> list[str]:
-    """Flatten repeatable / comma-separated --model values into a flat list.
-
-    The server filter param is `models` (plural, repeatable); a singular
-    `model=` is silently ignored by Metabase (probe-verified, ADR #10).
-    """
-    values: list[str] = []
-    for entry in model or []:
-        values.extend(part.strip() for part in entry.split(",") if part.strip())
-    return values
 
 
 @app.command(

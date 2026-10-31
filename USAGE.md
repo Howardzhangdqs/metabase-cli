@@ -656,8 +656,8 @@ mbcli overview --top 20 --format markdown
 
 ```bash
 printf 'databases list\ntables --db 15 --match fut\nsearch 手机 --limit 2\n' | mbcli batch
-# {"index":0,"argv":["databases","list"],"exit":0,"error":null,"result":[…]}
-# {"index":1,"argv":["tables","--db","15","--match","fut"],"exit":0,"error":null,"result":[…]}
+# {"index":1,"argv":["databases","list"],"exit":0,"error":null,"result":[…]}   ← index 从 1 起
+# {"index":2,"argv":["tables","--db","15","--match","fut"],"exit":0,"error":null,"result":[…]}
 ```
 
 行内错误不中断批次（该行 `exit`/`error` 记录，进程退出码任一非 0 则 1）；禁止嵌套 `batch`；行内不支持根级选项（连接配置走环境变量/配置文件）。

@@ -78,6 +78,7 @@ def root(
 # Command modules are imported after the callback definition: cli.py owns
 # registration, commands only depend on core modules (no import cycle).
 from mbcli.commands import (
+    batch,
     cards,
     collections,
     connect,
@@ -85,14 +86,15 @@ from mbcli.commands import (
     dashboards,
     databases,
     fields,
+    freshness,
     health,
+    overview,
     query,
     schemas,
     search,
     tables,
     whoami,
 )
-from mbcli.output import FieldsOpt, Format, FormatOpt, OutOpt
 
 app.command("health", epilog=health.EPILOG)(health.health)
 app.command("whoami", epilog=whoami.EPILOG)(whoami.whoami)
@@ -110,76 +112,10 @@ app.command("search", epilog=search.EPILOG)(search.search)
 app.command("context", epilog=context.EPILOG)(context.context)
 
 
-# -- v0.2 stubs (DESIGN §13): signatures are final, bodies land in wave 2 ------
-#
-# Registered in wave 1 so agents can depend on the option grammar; every body
-# fails fast with not_implemented (exit 1) instead of a usage error, so a
-# missing capability is distinguishable from a malformed invocation.
-
-FRESHNESS_EPILOG = (
-    "示例:\n"
-    "  mbcli freshness --db quant_data\n"
-    "  mbcli freshness --db 15 --table app_mau --table stock_daily\n"
-    "  mbcli freshness --db 15 --sample --max-tables 20   # 无指纹表显式采样"
-)
-
-
-@app.command("freshness", epilog=FRESHNESS_EPILOG)
-def freshness(
-    ctx: typer.Context,
-    db: Annotated[
-        str | None,
-        typer.Option("--db", help="数据库 id 或名称（缺省回退：default_db / MB_DEFAULT_DB）。"),
-    ] = None,
-    table: Annotated[
-        list[str] | None,
-        typer.Option("--table", help="限定表（id 或名称，可重复）；缺省=全库前 N 张。"),
-    ] = None,
-    max_tables: Annotated[
-        int,
-        typer.Option("--max-tables", min=1, help="处理表数上限（默认 20，防查询风暴）。"),
-    ] = 20,
-    sample: Annotated[
-        bool,
-        typer.Option(
-            "--sample", help="无指纹的表显式发 MIN/MAX 采样查询（默认只读指纹，零查询）。"
-        ),
-    ] = False,
-    format: FormatOpt = Format.json,
-    fields: FieldsOpt = None,
-    out: OutOpt = None,
-) -> None:
-    """每表时间列的 min/max 数据新鲜度（优先读字段指纹，零查询；v0.2 wave 2 实现）。"""
-    raise MbcliError(
-        "not_implemented", "freshness is registered but not implemented yet (v0.2 wave 2)"
-    )
-
-
-OVERVIEW_EPILOG = "示例:\n  mbcli overview\n  mbcli overview --top 20 --format markdown"
-
-
-@app.command("overview", epilog=OVERVIEW_EPILOG)
-def overview(
-    ctx: typer.Context,
-    top: Annotated[int, typer.Option("--top", min=1, help="最近更新资产条数（默认 10）。")] = 10,
-    format: FormatOpt = Format.json,
-    out: OutOpt = None,
-) -> None:
-    """实例总览：库×表数、集合内容分布、最近更新（v0.2 wave 2 实现）。"""
-    raise MbcliError(
-        "not_implemented", "overview is registered but not implemented yet (v0.2 wave 2)"
-    )
-
-
-BATCH_EPILOG = (
-    "示例:\n  printf 'tables --db 15 --match fut\\n# 注释行\\nfields --table 3258\\n' | mbcli batch"
-)
-
-
-@app.command("batch", epilog=BATCH_EPILOG)
-def batch(ctx: typer.Context) -> None:
-    """从 stdin 逐行读取子命令 argv，单进程批量执行（NDJSON 输出；v0.2 wave 3 实现）。"""
-    raise MbcliError("not_implemented", "batch is registered but not implemented yet (v0.2 wave 3)")
+# -- v0.2 (DESIGN §13): 命令体迁移至各自模块（wave 1 注册的最终签名不变）--------
+app.command("freshness", epilog=freshness.EPILOG)(freshness.freshness)
+app.command("overview", epilog=overview.EPILOG)(overview.overview)
+app.command("batch", epilog=batch.EPILOG)(batch.batch)
 
 
 def main(argv: list[str] | None = None) -> None:

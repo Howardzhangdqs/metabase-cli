@@ -57,6 +57,9 @@ dashboards show <id>                    # 结构（卡片清单+参数定义）
 search "关键词" [--model card|table]… [--limit N]        # --limit 0=拉全集(页100,上限1000)
 search "kw1,kw2" --match-any            # 多关键词并集，按 (model,id) 去重合并
 context --db D [--table T]…             # ★ 生成 markdown schema 摘要（直接可注入 prompt）
+freshness --db D [--table T]… [--sample]  # ★ 每表时间列 min/max（指纹优先，零查询；--sample 才发 MIN/MAX）
+overview [--top 10]                       # ★ 实例总览：库×表数、集合内容分布、最近更新
+printf 'tables --db 15 --match fut\n…' | mbcli batch   # 单进程批处理（NDJSON 行输出，共享会话省冷启动）
 ```
 
 记录数组型命令统一支持 `--format json|csv|ndjson|table|markdown`（markdown = 管道表，键名做表头）。

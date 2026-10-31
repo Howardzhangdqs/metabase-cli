@@ -760,45 +760,15 @@ def _assert_not_implemented(result):
     assert "not implemented" in error["message"]
 
 
-def test_stub_freshness_not_implemented(cli):
-    _assert_not_implemented(cli("freshness", "--db", "15"))
-
-
-def test_stub_freshness_full_signature_parses(cli):
-    _assert_not_implemented(
-        cli(
-            "freshness",
-            "--db",
-            "quant_data",
-            "--table",
-            "a",
-            "--table",
-            "b",
-            "--max-tables",
-            "5",
-            "--sample",
-            "--format",
-            "csv",
-        )
-    )
-
-
 def test_stub_freshness_max_tables_must_be_positive(cli):
     result = cli("freshness", "--db", "15", "--max-tables", "0")
     assert result.exit_code == 2
     assert result.error()["code"] == "invalid_args"
 
 
-def test_stub_overview_not_implemented(cli):
-    _assert_not_implemented(cli("overview"))
-
-
-def test_stub_overview_full_signature_parses(cli):
-    _assert_not_implemented(cli("overview", "--top", "3", "--format", "markdown"))
-
-
-def test_stub_batch_not_implemented(cli):
-    _assert_not_implemented(cli("batch"))
+# overview/batch/freshness stub tests were removed as each v0.2 wave landed its
+# command body (a stub asserting not_implemented cannot survive its own
+# implementation); the command-specific suites now own the contracts.
 
 
 def test_stubs_appear_in_help(cli):

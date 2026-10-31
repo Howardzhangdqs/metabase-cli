@@ -124,7 +124,7 @@ mbcli search "kw1,kw2" --match-any [--limit N]   # 多关键词并集，按 (mod
 mbcli context --db <id|name> [--table T]… [--max-tables 50] [--include-fields-pattern '.*'] [--markdown|--json]
 ```
 
-<!-- v0.2-wave2: freshness/overview/batch -->
+- **v0.2 新增**：`freshness`（数据新鲜度，指纹零查询）、`overview`（实例总览）、`batch`（stdin 批处理，单进程共享会话）、`search --match-any`/`--limit 0`、`fields --search` 跨表列搜索、全命令 `--format markdown`
 > v0.2 占位命令（已注册签名、尚未实现，调用返回 `not_implemented` exit 1）：
 > `freshness --db D [--table T]… [--max-tables 20] [--sample]`、`overview [--top 10]`、`batch`（stdin 逐行子命令）。
 

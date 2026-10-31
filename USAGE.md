@@ -628,7 +628,39 @@ markdown 全样例（真实布局；`estimated_row_count` 为 null 时显示 `~?
 
 可能错误码：`invalid_args`（--db 全缺 / 正则非法，exit 2，正则校验先于任何网络请求）、`not_found` / `ambiguous_ref`（表选择）、`auth_failed`、`network_error`、`timeout`。
 
-<!-- v0.2-wave2: freshness/overview/batch -->
+### freshness — 数据新鲜度（v0.2）
+
+每表自动挑一个时间列（优先级：语义类型 > `type/DateTime|Date` > 列名匹配 `date|dt|day|month|year|time`），**优先读 Metabase 同步指纹，全程零查询**；线上指纹形态为嵌套 `type/DateTime.{earliest,latest}`（实测 v0.66），扁平/空形态容错处理。
+
+```bash
+mbcli freshness --db 15                                   # 全库前 20 张（字典序），零查询
+mbcli freshness --db 15 --table app_mau --table 3258      # 指定表（id 或名称），不受上限约束
+mbcli freshness --db 15 --sample --max-tables 20          # 无指纹表显式发 MIN/MAX（标识符一律反引号）
+# 输出 [{table, table_id, column, min, max, source: fingerprint|sample|none, reason}]
+# 无指纹且未 --sample → source:"none", reason:"no fingerprint (use --sample)"
+```
+
+### overview — 实例总览（v0.2）
+
+一次调用看清实例全貌：库×表数（`?include=tables`，不可用自动回退逐库）、非个人顶层集合的卡片/仪表盘计数、最近更新 TOP N。
+
+```bash
+mbcli overview
+mbcli overview --top 20 --format markdown
+# 输出 {totals:{databases,collections,cards,dashboards}, databases:[…], collections:[…], recent:[…]}
+```
+
+### batch — 单进程批处理（v0.2）
+
+从 stdin 逐行读子命令 argv（`#` 注释/空行跳过），**一个进程跑完**——省去每次 uv 冷启动与登录（session 磁盘缓存共享，实测多条命令仅登录一次）。stdout 为 NDJSON，每命令一行：
+
+```bash
+printf 'databases list\ntables --db 15 --match fut\nsearch 手机 --limit 2\n' | mbcli batch
+# {"index":0,"argv":["databases","list"],"exit":0,"error":null,"result":[…]}
+# {"index":1,"argv":["tables","--db","15","--match","fut"],"exit":0,"error":null,"result":[…]}
+```
+
+行内错误不中断批次（该行 `exit`/`error` 记录，进程退出码任一非 0 则 1）；禁止嵌套 `batch`；行内不支持根级选项（连接配置走环境变量/配置文件）。
 
 ### 5.17 v0.2 占位命令：`freshness` / `overview` / `batch`
 

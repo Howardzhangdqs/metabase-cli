@@ -12,3 +12,6 @@ __pycache__/
 
 # 单文件脚本为生成物，不入库，经 GitHub Release 发布（scripts/release.sh）
 mbcli.py
+
+# skill 内置的生成物（clone 后按 SKILL.md §0 一键补齐）
+.opencode/skills/mbcli/mbcli.py

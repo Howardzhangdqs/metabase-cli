@@ -110,7 +110,13 @@ def show(
         if isinstance(item, dict)
     ]
     record = CollectionListing.from_api(payload, items=items).to_dict()
-    if fields:
-        # --fields prunes the item records only; envelope keys stay intact (§3.6)
-        record["items"] = prune_fields(record["items"], parse_fields(fields))
-    emit_object(record, fmt=format, out=out, no_color=state.no_color)
+    # §13.4 format audit: json keeps the {total,limit,offset,items} envelope;
+    # the tabular formats (csv/ndjson/table/markdown) render the items[] record
+    # array itself — with --fields selecting item keys / columns.
+    if format is Format.json:
+        if fields:
+            # --fields prunes the item records only; envelope keys stay intact (§3.6)
+            record["items"] = prune_fields(record["items"], parse_fields(fields))
+        emit_object(record, fmt=format, out=out, no_color=state.no_color)
+    else:
+        emit_records(record["items"], fmt=format, fields=fields, out=out, no_color=state.no_color)

@@ -1,6 +1,6 @@
 # mbcli — 面向 Agent 的 Metabase 命令行客户端
 
-> 📖 **完整使用文档见 [USAGE.md](USAGE.md)** — 全部 16 个命令的语法/选项表/示例/输出样例/错误码、Agent 集成指南与故障排查。
+> 📖 **完整使用文档见 [USAGE.md](USAGE.md)** — 全部命令的语法/选项表/示例/输出样例/错误码、Agent 集成指南与故障排查（v0.2 起含 markdown 格式、search --match-any/--limit 0、fields --search、保留字提示；freshness/overview/batch 为占位）。
 
 通过 Metabase REST API 浏览元数据、执行只读 SQL、检索已保存的资产（问题/集合/仪表盘），并一键生成适合注入 LLM prompt 的 schema 上下文。设计详见 [DESIGN.md](DESIGN.md)。
 
@@ -106,6 +106,7 @@ mbcli databases list                             # 全部数据库（该端点�
 mbcli schemas   --db <id|name>                   # 去重 schema（MySQL 通常仅 ""）
 mbcli tables    --db <id|name> [--schema S] [--match 子串] [--include-hidden]
 mbcli fields    --table <id|name> [--db D] [--include-hidden]   # 表名必须配 --db；id 可独立
+mbcli fields    --search <列名子串> --db D        # 跨表列搜索（零额外请求；reserved 标记保留字列）
 
 # ── 查询 ──
 mbcli query --db <id|name> --native "SELECT …" [--param k=v]… [--format …] [--max-rows 1000] [--out F] [--allow-write]
@@ -117,10 +118,15 @@ mbcli collections list [--all]                   # 默认滤掉个人集合
 mbcli collections show <id|name|root> [--model card|dashboard|collection|dataset]… [--limit N] [--offset N]
 mbcli dashboards show <id>                       # tabs / parameters / cards（含位置），不执行任何卡片
 mbcli search <QUERY> [--model …]… [--db D] [--limit 20] [--offset N]
+mbcli search "kw1,kw2" --match-any [--limit N]   # 多关键词并集，按 (model,id) 去重；--limit 0 = 拉全集（上限 1000）
 
 # ── Agent 增强 ──
 mbcli context --db <id|name> [--table T]… [--max-tables 50] [--include-fields-pattern '.*'] [--markdown|--json]
 ```
+
+<!-- v0.2-wave2: freshness/overview/batch -->
+> v0.2 占位命令（已注册签名、尚未实现，调用返回 `not_implemented` exit 1）：
+> `freshness --db D [--table T]… [--max-tables 20] [--sample]`、`overview [--top 10]`、`batch`（stdin 逐行子命令）。
 
 真实示例（对测试实例）：
 
@@ -129,8 +135,11 @@ mbcli --url https://metabase.example.com health
 mbcli databases list
 mbcli tables --db quant_data --match mau
 mbcli fields --table app_mau --db quant_data
+mbcli fields --search year_month --db 15            # 哪些表有 year_month 列（reserved:true 为保留字）
 mbcli query --db 15 --native "SELECT * FROM app_mau LIMIT 10" --format csv --max-rows 100
 mbcli search 数据 --limit 3
+mbcli search 手机,mobile,phone --match-any --limit 5   # 多关键词并集检索
+mbcli tables --db 15 --match fut --format markdown    # 管道表输出
 mbcli cards show 7876                            # 返回该卡片的 SQL
 mbcli collections show root --model card --limit 20
 mbcli dashboards show 1607
@@ -138,7 +147,7 @@ mbcli context --db quant_data --table app_mau    # 默认 markdown，可直接�
 mbcli context --db 15 --include-fields-pattern '^(uid|id)$' --json
 ```
 
-通用数据塑形选项（命令级）：`--format json|ndjson|csv|table`（默认 json；csv 仅适用于记录数组型命令）；`--fields a,b` 裁剪**记录**键（拼错报 `invalid_args`，绝不裁查询信封键）；`--out FILE` 结果落盘，stdout 改为摘要 `{"out":"…","rows":123,"truncated":false}`。
+通用数据塑形选项（命令级）：`--format json|ndjson|csv|table|markdown`（默认 json；记录数组型命令五种全支持——markdown 为管道表、键名做表头；csv/ndjson 仅记录数组与查询类）；`--fields a,b` 裁剪**记录**键（拼错报 `invalid_args`，绝不裁查询信封键）；`--out FILE` 结果落盘，stdout 改为摘要 `{"out":"…","rows":123,"truncated":false}`。
 
 ## Agent 契约
 
@@ -171,8 +180,13 @@ mbcli context --db 15 --include-fields-pattern '^(uid|id)$' --json
 
 **其他语义要点**
 
+- **五种输出格式**（记录数组型命令：databases/schemas/tables/fields/search/collections list 等）：`json`（默认）/ `ndjson` / `csv` / `table`（人读）/ `markdown`（GitHub 风格管道表，键名做表头，unicode 原样）。
 - `--model` 过滤以**复数 `models`** 参数发给服务端（可重复或逗号分隔；单数 `model=` 会被 Metabase 静默忽略）。
 - `search --db D` 是**对返回页的客户端过滤**（服务端 search 不支持按库过滤），可能因 limit 截断而漏配；按库找表的正规路径是 `tables --db D --match`。
+- `search --match-any "kw1,kw2"`：多关键词各自分页拉取后按 `(model,id)` 去重合并（first-seen 顺序）；`search --limit 0` 拉全集（客户端翻页，页 100，**硬上限 1000 行**，触顶时 json 输出变为 `{"truncated":true,"rows_returned":N,"items":[…]}` 信封、ndjson 末行追加 `{"truncated":…}` 哨兵）。
+- `fields --search <子串> --db D`：扫 metadata 全表字段做列名子串搜索（**零额外请求**），行含 `{"table","table_id","column","base_type","semantic_type","is_pk","fk_target","reserved"}`；`reserved:true` 表示该列名是 MySQL 8.0 保留字。
+- **MySQL 保留字防护**：内置保留字表（`src/mbcli/reserved.py`）；`bad_query` 报错 token 命中保留字时，`error.detail` 追加 `reserved_word` + 反引号提示；mbcli 自生成 SQL 一律反引号标识符（不改动用户 SQL）。
+- `-v` 请求日志**固定输出到 stderr**（凭据脱敏），stdout 永远只有数据。
 - `estimated_row_count` 一律为**约数**（同步估值，可差数量级），仅作排序/筛选用，不可依赖。
 - 名称引用（`--db/--table/--collection`）统一接受 `<id>` 或 `<name>`；重名报 `ambiguous_ref`（detail 列出候选 id，改用数字 id 即可）；collection 保留字 `root` 映射根集合。
 

@@ -13,6 +13,7 @@ import httpx
 from mbcli.auth import AuthManager, redact_secrets
 from mbcli.config import Config
 from mbcli.errors import MbcliError
+from mbcli.reserved import find_reserved_token
 
 DEFAULT_RETRY_BACKOFFS: tuple[float, ...] = (0.5, 1.0)
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -184,7 +185,17 @@ class MetabaseClient:
                     for key in ("error_type", "error_code"):
                         if body.get(key) is not None:
                             detail[key] = body[key]
-                    return MbcliError("bad_query", body_message() or "query failed", detail)
+                    message = body_message() or "query failed"
+                    # §13.4 / ADR #22: when the server error points at a MySQL
+                    # reserved word, append a backtick hint to error.detail
+                    # (user SQL is never rewritten — ADR #4).
+                    reserved = find_reserved_token(message)
+                    if reserved is not None:
+                        detail["reserved_word"] = reserved
+                        detail["hint"] = (
+                            f"列名 `{reserved}` 为保留字，请用反引号包裹（MySQL 8.0 保留字表）"
+                        )
+                    return MbcliError("bad_query", message, detail)
                 errors = body.get("errors")
                 if isinstance(errors, dict):
                     detail["errors"] = errors

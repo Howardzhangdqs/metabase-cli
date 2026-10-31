@@ -1,5 +1,5 @@
-"""Output shaping (DESIGN §3.6): json / ndjson / csv / table, --fields pruning,
---max-rows truncation, --out file writing with stdout summary.
+"""Output shaping (DESIGN §3.6, §13.4): json / ndjson / csv / table / markdown,
+--fields pruning, --max-rows truncation, --out file writing with stdout summary.
 
 stdout carries data only; json.dumps uses ensure_ascii=False and keys keep
 dataclass declaration order. --fields prunes record keys (or CSV columns) only —
@@ -30,12 +30,13 @@ class Format(str, Enum):
     ndjson = "ndjson"
     csv = "csv"
     table = "table"
+    markdown = "markdown"
 
 
-# Shared command-level data-shaping option types (DESIGN §3.7).
+# Shared command-level data-shaping option types (DESIGN §3.7, §13.4).
 FormatOpt = Annotated[
     Format,
-    typer.Option("--format", help="输出格式：json（默认）/ ndjson / csv / table。"),
+    typer.Option("--format", help="输出格式：json（默认）/ ndjson / csv / table / markdown。"),
 ]
 FieldsOpt = Annotated[
     str | None,
@@ -149,6 +150,24 @@ def render_table(
     return buffer.getvalue()
 
 
+def _md_cell(value: Any) -> str:
+    """Markdown table cell: pipe and newline escaped so layout stays intact."""
+    text = str(_cell(value))
+    return text.replace("|", "\\|").replace("\n", " ").replace("\r", "")
+
+
+def render_markdown(header: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
+    """GitHub-style pipe table (§13.4): record keys as the header row,
+    `|---|` separator, one row per record. Unicode-safe (no escaping)."""
+    lines = [
+        "| " + " | ".join(str(name) for name in header) + " |",
+        "|" + "|".join("---" for _ in header) + "|",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(_md_cell(value) for value in row) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def _write_stdout(text: str) -> None:
     if not text.endswith("\n"):
         text += "\n"
@@ -173,6 +192,15 @@ def emit_records(
     truncated: bool = False,
     no_color: bool = False,
 ) -> None:
+    """Emit a record array in any of the five formats (§13.4).
+
+    `truncated=True` means a fetch-level hard cap was hit (e.g. search
+    `--limit 0` at 1000 rows): the truncation is annotated in the output
+    itself, following the §5.2 philosophy — json becomes an envelope
+    `{"truncated": true, "rows_returned": N, "items": […]}`, ndjson gains a
+    trailing sentinel line, csv a `#` comment line, table/markdown a final
+    marker line. It also feeds the `--out` summary flag.
+    """
     field_list = parse_fields(fields)
     pruned = prune_fields(records, field_list)
     if field_list:
@@ -182,14 +210,28 @@ def emit_records(
     else:
         header = []
     rows = [[record.get(name) for name in header] for record in pruned]
+    sentinel = json.dumps({"truncated": True, "rows_returned": len(pruned)}, ensure_ascii=False)
     if fmt is Format.json:
-        text = render_json(pruned)
+        if truncated:
+            text = render_json({"truncated": True, "rows_returned": len(pruned), "items": pruned})
+        else:
+            text = render_json(pruned)
     elif fmt is Format.csv:
         text = render_csv(header, rows)
+        if truncated:
+            text += f"# {sentinel}\n"
     elif fmt is Format.ndjson:
         text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in pruned)
+        if truncated:
+            text += sentinel + "\n"
     elif fmt is Format.table:
         text = render_table(header, rows, no_color=no_color)
+        if truncated:
+            text += sentinel + "\n"
+    elif fmt is Format.markdown:
+        text = render_markdown(header, rows)
+        if truncated:
+            text += sentinel + "\n"
     else:  # pragma: no cover - enum exhaustiveness
         raise MbcliError("invalid_args", f"unsupported format: {fmt}")
     _finalize(text, out, rows=len(pruned), truncated=truncated)
@@ -221,6 +263,8 @@ def emit_envelope(
         text = render_ndjson(env)
     elif fmt is Format.table:
         text = render_table(header, rows, no_color=no_color)
+    elif fmt is Format.markdown:
+        text = render_markdown(header, rows)
     else:  # pragma: no cover
         raise MbcliError("invalid_args", f"unsupported format: {fmt}")
     _finalize(
@@ -235,16 +279,20 @@ def emit_object(
     out: str | None = None,
     no_color: bool = False,
 ) -> None:
-    """Single-object output (health, whoami): json or table only."""
+    """Single-object output (health, whoami): json, table or markdown."""
     data = to_jsonable(obj)
     if fmt is Format.table:
         rows = [[key, _cell(value)] for key, value in dict(data).items()]
         text = render_table(["key", "value"], rows, no_color=no_color)
+    elif fmt is Format.markdown:
+        rows = [[key, _cell(value)] for key, value in dict(data).items()]
+        text = render_markdown(["key", "value"], rows)
     elif fmt is Format.json:
         text = render_json(data)
     else:
         raise MbcliError(
             "invalid_args",
-            f"format '{fmt.value}' is not supported for single-object output; use json or table",
+            f"format '{fmt.value}' is not supported for single-object output;"
+            " use json, table or markdown",
         )
     _finalize(text, out, rows=1, truncated=False)

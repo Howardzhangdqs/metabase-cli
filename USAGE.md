@@ -29,12 +29,12 @@ mbcli 是面向 **AI Agent / 自动化脚本**的 Metabase 命令行客户端：
 
 | 约定 | 说明 |
 |---|---|
-| **stdout = 数据** | 默认输出 JSON（`ensure_ascii=False`，中文原样）；stdout 永远只有数据 |
+| **stdout = 数据** | 默认输出 JSON（`ensure_ascii=False`，中文原样）；stdout 永远只有数据；`-v` 请求日志**固定走 stderr**，绝不污染数据流 |
 | **stderr = 诊断** | `-v` 日志与错误都走 stderr；错误为**单行 JSON**（见 §6） |
 | **稳定退出码** | `0` 成功 / `1` API 与执行错误 / `2` 用法错误 |
 | **稳定字段名** | 输出字段为 snake_case **白名单**（固化于 `models.py`），Metabase 上游新增字段不会混入输出 |
 | **只读定位** | 无任何管理/写命令；`query` 默认拒绝非 SELECT 语句（词法级 write-guard） |
-| **有限命令集** | 16 个命令：health / whoami / connect / disconnect / databases list / schemas / tables / fields / query / cards run / cards show / collections list / collections show / dashboards show / search / context |
+| **有限命令集** | 19 个命令：health / whoami / connect / disconnect / databases list / schemas / tables / fields / query / cards run / cards show / collections list / collections show / dashboards show / search / context + v0.2 占位 freshness / overview / batch（见 §5.17） |
 
 ---
 
@@ -170,8 +170,8 @@ mbcli query --db 15 --url https://metabase.example.com --native "SELECT 1"
 ## 5. 命令详解
 
 > 通用命令级选项（下表省略重复说明）：
-> `--format <json|ndjson|csv|table>`（默认 json）、`--fields a,b`（裁剪记录键，拼错报 `invalid_args`，**绝不裁剪查询信封**）、`--out FILE`（结果落盘，stdout 变摘要 `{"out":"…","rows":N,"truncated":bool}`）、`--max-rows`（仅查询类，默认 1000，`0` = 不限，客户端截断）。
-> 单对象命令（health/whoami/cards show/collections show/dashboards show）只支持 `json`/`table`，选 `csv`/`ndjson` → `invalid_args` (exit 2)。
+> `--format <json|ndjson|csv|table|markdown>`（默认 json）、`--fields a,b`（裁剪记录键，拼错报 `invalid_args`，**绝不裁剪查询信封**）、`--out FILE`（结果落盘，stdout 变摘要 `{"out":"…","rows":N,"truncated":bool}`）、`--max-rows`（仅查询类，默认 1000，`0` = 不限，客户端截断）。
+> 记录数组型命令五种格式全支持；collections show 的 csv/ndjson/table/markdown 渲染其 `items[]`（json 保持分页信封）；单对象命令（health/whoami/cards show/dashboards show）支持 json/table/markdown，选 `csv`/`ndjson` → `invalid_args` (exit 2)。
 
 ### 5.1 `mbcli health`
 
@@ -342,29 +342,44 @@ mbcli tables --db 15 --fields id,name,estimated_row_count --format csv
 
 ### 5.8 `mbcli fields`
 
-表字段明细（`GET /api/table/{id}/query_metadata`，FK target 已水合）。
+表字段明细（`GET /api/table/{id}/query_metadata`，FK target 已水合），或跨表列名搜索（v0.2）。
 
 ```
 mbcli fields --table <id|name> [--db <id|name>] [--include-hidden]
+            [--format FMT] [--fields KEYS] [--out FILE]
+mbcli fields --search <子串> --db <id|name> [--include-hidden]
             [--format FMT] [--fields KEYS] [--out FILE]
 ```
 
 | 选项 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `--table` | str | **必填** | 表 id 或 name；name 需配合 `--db`（或缺省库） |
-| `--db` | str | 无 | name 解析用；省略时走缺省库回退；**纯数字表 id 无需任何 db** |
-| `--include-hidden` | flag | 关 | 包含隐藏字段 |
+| `--table` | str | — | 表 id 或 name；name 需配合 `--db`（或缺省库）。与 `--search` 互斥 |
+| `--search` | str | — | **跨表列名子串搜索**（大小写不敏感）；需 `--db`（或缺省库）。扫 metadata 全表字段，**零额外请求**；默认不含隐藏表（`--include-hidden` 放开） |
+| `--db` | str | 无 | name/列搜索解析用；省略时走缺省库回退；**纯数字表 id 无需任何 db** |
+| `--include-hidden` | flag | 关 | 包含隐藏字段/隐藏表 |
+
+两者都缺、或同时给出 → `invalid_args`（exit 2）。
 
 ```bash
 mbcli fields --table app_mau --db quant_data
 mbcli fields --table 3258                # 数字 id：不需要 --db
+mbcli fields --search year_month --db 15 # 哪些表有该列
+mbcli fields --search phone --db 15 --format markdown
 ```
+
+`--table` 输出（键序即此顺序）：
 
 ```json
 [{"id": 37677, "name": "date", "display_name": "date", "base_type": "type/Text", "semantic_type": null, "database_type": "VARCHAR", "description": null, "is_pk": false, "is_nullable": true, "is_indexed": null, "fk_target": null, "position": 0}, …]
 ```
 
-`fk_target` 形如 `{"table": "users", "field": "id"}`；`position` 是**物理列序**（`database_position`）。可能错误码：`invalid_args`（name 无任何 db）、`not_found`、`ambiguous_ref`、`auth_failed`、`network_error`、`timeout`。
+`--search` 输出（v0.2 §13.4；`fk_target` 经 metadata 内 `fk_target_field_id` 反查，同响应内解析）：
+
+```json
+[{"table": "tab_x", "table_id": 3301, "column": "year_month", "base_type": "type/Text", "semantic_type": null, "is_pk": false, "fk_target": null, "reserved": true}, …]
+```
+
+`reserved:true` 表示列名命中 **MySQL 8.0 保留字表**（`date`/`order`/`key`/`year_month`/`rank`…）——写 SQL 时请用反引号包裹，如 `` SELECT `year_month` FROM tab_x ``。`fk_target` 形如 `{"table": "users", "field": "id"}`；`position`（--table 模式）是**物理列序**（`database_position`）。可能错误码：`invalid_args`（name 无任何 db / --table 与 --search 互斥）、`not_found`、`ambiguous_ref`、`auth_failed`、`network_error`、`timeout`。
 
 ### 5.9 `mbcli query` ⭐
 
@@ -482,7 +497,7 @@ mbcli collections list --all --format csv
 
 ### 5.13 `mbcli collections show`
 
-浏览集合内容（分页信封）。`--model` 过滤以**复数 `models`** 参数发给服务端（单数 `model=` 会被 Metabase 静默忽略）。
+浏览集合内容（分页信封）。`--model` 过滤以**复数 `models`** 参数发给服务端（单数 `model=` 会被 Metabase 静默忽略）。json 输出 `{total,limit,offset,items}` 信封；csv/ndjson/table/markdown 直接渲染 `items[]` 记录数组（v0.2 §13.4 格式统一）。
 
 ```
 mbcli collections show <id|name|root> [--model M]… [--limit N] [--offset N]
@@ -537,29 +552,34 @@ mbcli dashboards show 1607 --fields id,name,cards
 全局检索资产（`GET /api/search`），Agent 定位资产的入口。
 
 ```
-mbcli search QUERY [--model M]… [--db <id|name>] [--limit N] [--offset N]
+mbcli search QUERY [--model M]… [--db <id|name>] [--limit N] [--offset N] [--match-any]
                    [--format FMT] [--fields KEYS] [--out FILE]
 ```
 
 | 选项 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `query` | str | **必填**（位置参数） | 关键词 |
+| `query` | str | **必填**（位置参数） | 关键词；`--match-any` 时为逗号分隔多关键词 |
 | `--model` | str（可重复/逗号分隔） | 无 | 复数 `models` 透传；card/dashboard/collection/table/dataset/metric |
 | `--db` | str | 无 | **页内客户端过滤**：card 匹配 `database_id`、table 匹配 `table_db_id`，两者皆无的条目被丢弃；可能因 limit 截断漏配（见 §8） |
-| `--limit` | int ≥1 | 无（服务端默认 50） | 页大小 |
+| `--limit` | int ≥0 | 无（服务端默认 50） | 页大小；**`0` = 拉全集**：客户端翻页（页 100，硬上限 1000 行），触顶时输出尾标注 truncated |
 | `--offset` | int ≥0 | 无（不发送，即从头开始） | 翻页 |
+| `--match-any` | flag | 关 | 把 QUERY 视为逗号分隔多关键词：各关键词分页拉取后按 `(model,id)` 去重合并（first-seen 顺序，ADR #21）；`--limit N` 变为合并结果的输出上限 |
 
 ```bash
 mbcli search 数据 --limit 3
 mbcli search 收入 --model card,dashboard --limit 10
 mbcli search 用户 --db 15 --limit 20
+mbcli search 手机,mobile,phone --match-any --limit 5    # 多关键词并集
+mbcli search 用户 --limit 0                             # 拉全集（≤1000 行）
 ```
 
 ```json
 [{"id": 7876, "model": "card", "name": "数据日期", "description": null, "collection": {"id": 1039, "name": "微信"}, "database_id": null, "updated_at": "2026-10-30T22:21:23.292094+08:00"}, …]
 ```
 
-注意：本实例的 search 条目 `database_id` 常为 `null`（见 §8）。找某库的表请用 `tables --db D --match`。可能错误码：`not_found`（--db 名字解析）、`invalid_args`、`auth_failed`、`network_error`、`timeout`。
+**`--limit 0` / `--match-any` 全集模式的截断标注**（§5.2 哲学）：命中 1000 行硬上限时——json 变为信封 `{"truncated": true, "rows_returned": 1000, "items": […]}`；ndjson 末行追加哨兵 `{"truncated": true, "rows_returned": 1000}`；csv 末行追加 `# {"truncated": …}` 注释行；table/markdown 末行追加同名标记行。未触顶时输出与普通模式完全一致（纯数组）。
+
+注意：本实例的 search 条目 `database_id` 常为 `null`（见 §8）。找某库的表请用 `tables --db D --match`。可能错误码：`not_found`（--db 名字解析）、`invalid_args`（--match-any 空关键词）、`auth_failed`、`network_error`、`timeout`。
 
 ### 5.16 `mbcli context` ⭐
 
@@ -608,6 +628,29 @@ markdown 全样例（真实布局；`estimated_row_count` 为 null 时显示 `~?
 
 可能错误码：`invalid_args`（--db 全缺 / 正则非法，exit 2，正则校验先于任何网络请求）、`not_found` / `ambiguous_ref`（表选择）、`auth_failed`、`network_error`、`timeout`。
 
+<!-- v0.2-wave2: freshness/overview/batch -->
+
+### 5.17 v0.2 占位命令：`freshness` / `overview` / `batch`
+
+v0.2 已**注册**以下命令的完整选项签名（可 `--help` 查看），但实现分批交付——当前调用立即返回 `not_implemented`（exit 1，stderr JSON），**不是**用法错误（exit 2）：
+
+```
+mbcli freshness --db <id|name> [--table T]… [--max-tables 20] [--sample] [--format …] [--fields …] [--out F]
+mbcli overview [--top 10] [--format …] [--out F]
+mbcli batch < stdin    # 每行一条子命令 argv，输出 NDJSON
+```
+
+| 命令 | 用途（规划） | 关键选项 |
+|---|---|---|
+| `freshness` | 每表时间列 min/max 数据新鲜度；优先读字段指纹（零查询），无指纹且 `--sample` 才发 `SELECT MIN(\`col\`), MAX(\`col\`)` | `--db`（缺省库回退）、`--table`（可重复）、`--max-tables`（默认 20，防查询风暴）、`--sample` |
+| `overview` | 实例总览：库×表数、非个人顶层集合内容分布、最近更新 | `--top`（默认 10） |
+| `batch` | 单进程多命令（消 uv 冷启动），stdout 每命令一行 NDJSON | — |
+
+```bash
+mbcli freshness --db 15        # {"error":{"code":"not_implemented",…}} exit 1（wave 2 实装）
+mbcli overview --top 20
+```
+
 ---
 
 ## 6. Agent 集成指南
@@ -634,7 +677,7 @@ stderr 单行 JSON（`ensure_ascii=False`）：
 | `auth_failed` | 1 | 登录失败或 401（错密码/key 指向凭据） |
 | `permission_denied` | 1 | 403（如无权集合） |
 | `not_found` | 1 | 404 或名称解析无命中 |
-| `bad_query` | 1 | SQL 语义错误（400 + `status=failed`） |
+| `bad_query` | 1 | SQL 语义错误（400 + `status=failed`）；报错 token 命中 MySQL 保留字时 `detail` 追加 `reserved_word` + 反引号提示 |
 | `invalid_request` | 1 | 400 参数校验错（`detail.errors` 字段级） |
 | `rate_limited` | 1 | 429 |
 | `server_error` | 1 | 5xx |
@@ -643,6 +686,7 @@ stderr 单行 JSON（`ensure_ascii=False`）：
 | `unhealthy` | 1 | health 非 ok |
 | `ambiguous_ref` | 1 | 名称多命中（detail 列候选 id，改用数字 id） |
 | `invalid_response` | 1 | 响应不是预期 JSON 结构 |
+| `not_implemented` | 1 | v0.2 占位命令（freshness/overview/batch）实装前的固定返回 |
 | `invalid_args` | **2** | 参数用法错误（typer 层 + 业务校验） |
 | `write_blocked` | **2** | 非 SELECT 被拦（detail 提示加 `--allow-write`） |
 
@@ -708,11 +752,21 @@ mbcli context --table app_mau > context.md                    # ⑤ 生成 promp
 | 格式 | 场景 | 样例 |
 |---|---|---|
 | `json`（默认） | Agent 消费；对象或数组 | 见各命令 |
-| `csv` | 表格/Excel；**仅记录数组型命令**（databases/tables/fields/schemas/collections list/search/query/cards run） | 见下 |
+| `csv` | 表格/Excel；**仅记录数组型命令**（databases/tables/fields/schemas/collections list/search/query/cards run；collections show 渲染其 items[]） | 见下 |
 | `ndjson` | 流式消费大结果；**仅查询类**（query/cards run）与记录数组 | 见 §6.4 |
 | `table` | 人读调试（rich 表格）；可配 `--no-color` | — |
+| `markdown` | 管道表（GitHub 风格）；记录键名做表头，unicode 原样，单元格内 `\|` 与换行转义；**记录数组型命令 + 查询类 + 单对象命令**（whoami 等）均支持 | 见下 |
 
-**csv 规则（RFC 4180）**：`\r\n` 行尾；含逗号/引号/换行的字段加引号，`"` 转义为 `""`；`null` 输出空；unicode 原样 UTF-8。实跑样例（`SELECT 'a,b' AS x, 'say "hi"' AS y UNION ALL SELECT NULL, '换行前'`）：
+**markdown 样例**（`mbcli tables --db 15 --match fut --format markdown`）：
+
+```markdown
+| id | schema | name | display_name | description | estimated_row_count | active | field_count |
+|---|---|---|---|---|---|---|---|
+| 3301 |  | fut_basic | fut_basic |  | 1234 | true | 20 |
+| 3302 |  | fut_daily | fut_daily | 期货行情 | 56789 | true | 15 |
+```
+
+**csv 规则（RFC 4180）**：`\r\n` 行尾；含逗号/引号/换行的字段加引号，`"` 转义为 `""`；`null` 输出空；unicode 原样 UTF-8；嵌套对象单元格渲染为 JSON 文本。实跑样例（`SELECT 'a,b' AS x, 'say "hi"' AS y UNION ALL SELECT NULL, '换行前'`）：
 
 ```csv
 x,y
@@ -720,7 +774,7 @@ x,y
 ,换行前
 ```
 
-`--fields id,name` 可在 CSV 里只导出指定列；`--out FILE` 落盘并输出摘要 `{"out": "r.csv", "rows": 3, "truncated": false}`。
+`--fields id,name` 可在 CSV/markdown 里只导出指定列；`--out FILE` 落盘并输出摘要 `{"out": "r.csv", "rows": 3, "truncated": false}`。
 
 ---
 
@@ -730,7 +784,7 @@ x,y
 |---|---|
 | `auth_failed` | 核对账密/API Key；session 模式下先 `mbcli whoami` 快速验证；key 模式 401 即 key 无效 |
 | `config_missing` | 无 URL：`mbcli connect` 一次或设 `MB_URL`；缺凭据：设 `MB_API_KEY` 或 `MB_USERNAME/MB_PASSWORD`（`health` 无凭据也能跑，可先排除网络问题） |
-| `bad_query` | message 含服务端原因（表/列不存在等）；detail 带 `http_status`/`error_type` |
+| `bad_query` | message 含服务端原因（表/列不存在等）；detail 带 `http_status`/`error_type`；**命中保留字**时 detail 另带 `reserved_word` 与"请用反引号包裹"提示（如列名 `year_month`），改写 SQL 为 `` `year_month` `` 后重试 |
 | `not_found` | 404 或名称无命中；用 `databases list` / `tables --match` 找正确名字或直接用数字 id |
 | `permission_denied` | 当前账号对该对象无权限（如他人个人集合），预期行为 |
 | `write_blocked` | exit 2：加 `--allow-write`（明确知晓风险才加）；白名单 SELECT/WITH/SHOW/DESCRIBE/EXPLAIN，多语句每条都要过检 |

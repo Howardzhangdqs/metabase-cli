@@ -385,3 +385,54 @@ dashboards show → {"id":1607,"name":"…","description":null,"collection":{…
 
 1. `cards run` / `query --param` 对带参卡片与 field-filter（`dimension` 目标）模板的实测行为——M2 用真实带参卡片验证后决定 `k:type=v` 逃生舱的具体形态。
 2. API Key 冒烟：文档已定稿（`X-API-Key`、v49+、无过期），待拿到真实 key 后在实例上跑一次 `whoami` 验证。
+
+## 13. v0.2.0 增量（实测反馈驱动，2026-10-31）
+
+> 来源：真实 Agent 会话（"手机领域数据摸底"任务）9 条反馈；#1/#2/#5 为最高价值。
+
+### 13.1 新命令 `freshness`（数据新鲜度）
+
+```
+mbcli freshness --db <id|name> [--table T]… [--max-tables 20] [--sample] [--format …]
+```
+- **时间列自动识别**（每表选一列，按优先级）：`semantic_type ∈ {type/CreationTimestamp, type/UpdatedAt, type/CreationTime}` > `base_type ∈ {type/DateTime, type/Date}` > 名称匹配 `(^|_)(date|dt|day|month|year|time)$`；平分时取 `database_position` 靠前者。
+- **取值来源**：优先读 db metadata 字段 `fingerprint` 的 min/max（**零查询**）；无指纹且给 `--sample` 才对该表发 `SELECT MIN(\`col\`), MAX(\`col\`)`（mbcli 生成的 SQL **一律反引号**标识符）；默认 `--max-tables 20` 防查询风暴。
+- 输出：`[{"table","table_id","column","min","max","source":"fingerprint"|"sample"|"none","reason"}]`，支持全部格式。
+
+### 13.2 新命令 `overview`（实例总览）
+
+```
+mbcli overview [--top 10] [--format …]
+```
+- 库×表数：`GET /api/database?include=tables`（实测确认形态；不可用则回退逐库 metadata 并标注 slow）。
+- 内容分布：非个人**顶层**集合（上限 50）× `{models=card, models=dashboard}` 各取 `total`。
+- 最近更新：各集合 items（limit=100）合并按 `updated_at` 倒序取 `--top`。
+- 输出：`{"totals":{databases,collections,cards,dashboards},"databases":[{"id","name","engine","table_count"}],"collections":[{"collection":{id,name},"cards":N,"dashboards":N}],"recent":[{"model","id","name","collection","updated_at"}]}`。
+
+### 13.3 新命令 `batch`（单进程多命令，消 uv 冷启动）
+
+```
+mbcli batch < stdin    # 每行一条子命令 argv，如: tables --db 15 --match fut
+```
+- `#` 注释/空行跳过；进程内共享 client/session/resolver 缓存；禁止嵌套 `batch`。
+- stdout = NDJSON，每命令一行：`{"index","argv","exit","error","result"}`（result 为该命令本应输出的 JSON 对象/数组；非 JSON 格式时为字符串）。
+- 进程退出码：全部成功 0，任一非 0 则 1。
+
+### 13.4 既有命令增强
+
+- **格式统一**：所有记录数组型命令（databases/schemas/tables/fields/search/collections list/show/freshness）补齐 `--format json|csv|ndjson|table|markdown`（markdown = 管道表，键名做表头）；审计现状补齐缺口。
+- **search**：新增 `--match-any "kw1,kw2"`（多关键词各取全集后按 `(model,id)` 去重合并）；`--limit 0` = 拉全集（客户端翻页，页大小 100，硬上限 1000 行防爆炸，超限截断并在输出尾标注）。
+- **fields 跨表列搜索**：`fields --search <子串> --db D` —— 扫 metadata 全表字段（零额外请求），输出 `[{"table","table_id","column","base_type","semantic_type","is_pk","fk_target"}]`；标注 MySQL 保留字列（`reserved: true`）。
+- **保留字防护**：内置 MySQL 8.0 保留字表；mbcli 自生成 SQL 一律反引号；`bad_query` 且报错 token 命中保留字表时，error.detail 追加提示（"列名 \`year_month\` 为保留字，请用反引号包裹"）。
+- **`-v` 日志去向修正**：请求日志必须走 stderr（实测疑似进 stdout 污染数据流——若确认按 bug 修复并补测试）。
+
+### 13.5 SKILL.md 修正
+
+运行器示例改 zsh 安全的 shell 函数：`mb() { uv run --no-project --with typer --with httpx python mbcli.py "$@"; }`（原 `MB="uv run …"; $MB …` 在 zsh 下 exit 127）。
+
+| ADR | 决策 |
+|---|---|
+| 19 | freshness 零查询优先（fingerprint），采样查询显式 opt-in 且限量 | 反馈 #1：摸新鲜度是最高频动作，不能默认产生 328 条 SQL |
+| 20 | batch 输出 NDJSON 包装而非拼接 stdout | 保持"stdout 只有数据"可流式解析；uv 冷启动成本摊平到多命令 |
+| 21 | 多关键词/列级搜索在客户端归并（服务端无此能力） | 反馈 #4；列搜索复用 metadata 缓存零请求 |
+| 22 | 保留字只做"生成侧反引号 + 错误侧提示"，不改写用户 SQL | 与 ADR #4（零侵入）一致 |
